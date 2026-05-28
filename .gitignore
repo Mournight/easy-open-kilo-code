@@ -1,0 +1,25 @@
+# Python cache and byte-compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments and dependencies
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Distribution and packaging
+build/
+dist/
+*.egg-info/
+*.spec
+
+# IDEs and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
