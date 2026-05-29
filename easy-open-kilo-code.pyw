@@ -1885,7 +1885,7 @@ class App(ctk.CTk):
         """创建主界面组件"""
         # 顶部工具栏
         toolbar = ctk.CTkFrame(self, height=45)
-        toolbar.pack(fill="x", padx=10, pady=(5, 2))
+        toolbar.pack(fill="x", padx=10, pady=(2, 1))
         toolbar.pack_propagate(False)
         
         # 标题区域：品牌下拉融入标题
@@ -1964,7 +1964,7 @@ class App(ctk.CTk):
         
         # 主内容区域 - 标签页
         self.tabview = ctk.CTkTabview(self)
-        self.tabview.pack(fill="both", expand=True, padx=10, pady=(2, 5))
+        self.tabview.pack(fill="both", expand=True, padx=10, pady=(0, 3))
         
         # 创建标签页
         self.tab_provider = self.tabview.add("Provider 管理")
@@ -1996,9 +1996,6 @@ class App(ctk.CTk):
         }
         color = color_map.get(msg_type, "gray")
         self.status_label.configure(text=message, text_color=color)
-        
-        # 5秒后自动清除
-        self.after(5000, lambda: self.status_label.configure(text=""))
     
     def schedule_auto_save(self, delay_ms: int = 1000):
         """调度自动保存（防抖）"""
@@ -2207,7 +2204,7 @@ class App(ctk.CTk):
             
             if not silent:
                 if self.brand == "Kilo Code":
-                    self.show_status("配置已保存 | 请在 VS Code 中按 Ctrl+R 重新加载窗口使配置生效", "warning")
+                    self.show_status("配置已保存 | 请按 Ctrl+Shift+P 输入 Reload Window 执行 Developer: Reload Window", "warning")
                 else:
                     self.show_status("配置已保存 | 请重启 OpenCode 或在 TUI 中输入 /reload 使配置生效", "warning")
             
