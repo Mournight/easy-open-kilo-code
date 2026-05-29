@@ -96,23 +96,23 @@ def get_agents_md_path() -> Path:
     """获取全局 AGENTS.md 路径"""
     return get_opencode_config_dir() / "AGENTS.md"
 
-def get_auth_json_path() -> Path:
-    """获取 auth.json 路径"""
-    # 支持 OPENCODE_AUTH_PATH 环境变量
+def _brand_auth_json_path(brand: str) -> Path:
+    """获取指定品牌的 auth.json 路径"""
+    if brand == "Kilo Code":
+        return Path.home() / ".config" / "kilo" / "auth.json"
+    # OpenCode
     auth_path = os.environ.get("OPENCODE_AUTH_PATH")
     if auth_path:
         return Path(auth_path)
-    
-    # 默认路径
-    system = platform.system()
-    if system == "Windows":
-        return Path.home() / ".local" / "share" / "opencode" / "auth.json"
-    else:
-        return Path.home() / ".local" / "share" / "opencode" / "auth.json"
+    return Path.home() / ".local" / "share" / "opencode" / "auth.json"
 
-def load_auth_json() -> Dict:
+def get_auth_json_path() -> Path:
+    """获取 auth.json 路径（默认 OpenCode）"""
+    return _brand_auth_json_path("OpenCode")
+
+def load_auth_json(brand: str = "OpenCode") -> Dict:
     """加载 auth.json"""
-    auth_path = get_auth_json_path()
+    auth_path = _brand_auth_json_path(brand)
     if auth_path.exists():
         try:
             with open(auth_path, "r", encoding="utf-8") as f:
@@ -121,12 +121,60 @@ def load_auth_json() -> Dict:
             pass
     return {}
 
-def save_auth_json(auth_data: Dict):
+def save_auth_json(auth_data: Dict, brand: str = "OpenCode"):
     """保存 auth.json"""
-    auth_path = get_auth_json_path()
+    auth_path = _brand_auth_json_path(brand)
     auth_path.parent.mkdir(parents=True, exist_ok=True)
     with open(auth_path, "w", encoding="utf-8") as f:
         json.dump(auth_data, f, indent=2, ensure_ascii=False)
+
+def _brand_config_dir(brand: str) -> Path:
+    """获取指定品牌的全局配置目录"""
+    return Path.home() / ".config" / ("opencode" if brand == "OpenCode" else "kilo")
+
+def _brand_config_path(brand: str) -> Path:
+    """获取指定品牌的全局配置文件路径（优先 .jsonc）"""
+    config_dir = _brand_config_dir(brand)
+    if brand == "OpenCode":
+        jsonc_path = config_dir / "opencode.jsonc"
+        json_path = config_dir / "opencode.json"
+    else:
+        jsonc_path = config_dir / "kilo.jsonc"
+        json_path = config_dir / "kilo.json"
+
+    if jsonc_path.exists():
+        return jsonc_path
+    if json_path.exists():
+        return json_path
+    return jsonc_path
+
+def _brand_agents_md_path(brand: str) -> Path:
+    """获取指定品牌的全局 AGENTS.md 路径"""
+    return _brand_config_dir(brand) / "AGENTS.md"
+
+def _default_schema_url(brand: str) -> str:
+    """返回品牌对应的默认 $schema"""
+    return "https://opencode.ai/config.json" if brand == "OpenCode" else "https://app.kilo.ai/config.json"
+
+def _to_k_display(value: int) -> str:
+    """将数值转换为 K 单位显示，保持 1000 的整数倍尽量用整数"""
+    if value >= 1000 and value % 1000 == 0:
+        return str(value // 1000)
+    return str(value)
+
+def _parse_k_display(text: str, default_k_value: int) -> int:
+    """解析 K 单位显示文本，返回原始数值。
+    - 支持 20 / 20K / 20000 等输入
+    - default_k_value 是当输入为空时默认的 K 值
+    """
+    raw = text.strip().upper().replace("K", "")
+    if not raw:
+        return default_k_value * 1000
+    try:
+        number = int(raw)
+    except ValueError:
+        return default_k_value * 1000
+    return number * 1000 if number <= 100000 else number
 
 def clean_base_url(url: str) -> str:
     """清洗 base URL，移除多余的斜杠"""
@@ -394,7 +442,7 @@ class JsonImportDialog(ctk.CTkToplevel):
         # 说明标签
         ctk.CTkLabel(
             self, 
-            text="请粘贴 OpenCode 标准 MCP JSON 配置（支持 mcpServers/mcp 包装）",
+            text="请粘贴 OpenCode / Kilo Code 标准 MCP JSON 配置（支持 mcpServers/mcp 包装）",
             font=(FONT_FAMILY, FONT_SIZE_NORMAL)
         ).pack(padx=20, pady=(15, 5))
         
@@ -1522,10 +1570,14 @@ class McpCompactionFrame(ctk.CTkFrame):
         ).pack(side="left", padx=(15, 5), pady=10)
         
         self.reserved_entry = ctk.CTkEntry(
-            compaction_frame, placeholder_text="20000", width=100,
+            compaction_frame, placeholder_text="20", width=100,
             font=(FONT_FAMILY, FONT_SIZE_NORMAL), justify="center"
         )
         self.reserved_entry.pack(side="left", padx=5, pady=10)
+
+        ctk.CTkLabel(
+            compaction_frame, text="K", font=(FONT_FAMILY, FONT_SIZE_NORMAL, "bold"), text_color="#FFD700"
+        ).pack(side="left")
         
         # 说明
         info_label = ctk.CTkLabel(
@@ -1683,15 +1735,16 @@ class McpCompactionFrame(ctk.CTkFrame):
         self.auto_var.set(config.get("auto", True))
         self.prune_var.set(config.get("prune", True))
         
+        reserved_value = int(config.get("reserved", 20000))
         self.reserved_entry.delete(0, "end")
-        self.reserved_entry.insert(0, str(config.get("reserved", 20000)))
+        self.reserved_entry.insert(0, _to_k_display(reserved_value))
     
     def get_compaction(self) -> Dict:
         """获取压缩配置"""
         return {
             "auto": self.auto_var.get(),
             "prune": self.prune_var.get(),
-            "reserved": int(self.reserved_entry.get().strip() or "20000")
+            "reserved": _parse_k_display(self.reserved_entry.get(), default_k_value=20)
         }
 
 
@@ -1781,6 +1834,12 @@ class InstructionsFrame(ctk.CTkFrame):
             else:
                 os.system(f'xdg-open "{folder}"')
 
+    def switch_agents_path(self, new_path: Path):
+        """切换 AGENTS.md 路径并刷新界面"""
+        self.agents_md_path = new_path
+        self.path_label.configure(text=str(self.agents_md_path))
+        self._load_file()
+
 
 class App(ctk.CTk):
     """主应用窗口"""
@@ -1795,11 +1854,16 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("system")
         ctk.set_default_color_theme("blue")
         
+        # 品牌状态（默认 OpenCode）
+        self.brand = "OpenCode"
+        
         # 配置文件路径
         self.config_path = get_opencode_config_path()
+        self.agents_md_path = get_agents_md_path()
         self.config = {}
         
         self._create_widgets()
+        self._apply_brand("OpenCode")
         self._load_config(silent=True)
     
     def _create_widgets(self):
@@ -1809,9 +1873,25 @@ class App(ctk.CTk):
         toolbar.pack(fill="x", padx=10, pady=5)
         toolbar.pack_propagate(False)
         
+        # 标题区域：品牌下拉融入标题
+        title_frame = ctk.CTkFrame(toolbar, fg_color="transparent")
+        title_frame.pack(side="left", padx=10)
+
+        self.brand_var = ctk.StringVar(value=self.brand)
+        self.brand_menu = ctk.CTkOptionMenu(
+            title_frame,
+            values=["OpenCode", "Kilo Code"],
+            variable=self.brand_var,
+            command=self._apply_brand,
+            width=160,
+            font=(FONT_FAMILY, FONT_SIZE_TITLE, "bold"),
+            dropdown_font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+        )
+        self.brand_menu.pack(side="left")
+
         ctk.CTkLabel(
-            toolbar, text=APP_NAME, font=(FONT_FAMILY, FONT_SIZE_TITLE, "bold")
-        ).pack(side="left", padx=10)
+            title_frame, text="配置编辑器", font=(FONT_FAMILY, FONT_SIZE_TITLE, "bold")
+        ).pack(side="left", padx=(5, 0))
         
         # 配置文件路径显示
         self.config_path_label = ctk.CTkLabel(
@@ -1820,13 +1900,7 @@ class App(ctk.CTk):
         )
         self.config_path_label.pack(side="left", padx=20)
         
-        # 状态标签
-        self.status_label = ctk.CTkLabel(
-            toolbar, text="", font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        )
-        self.status_label.pack(side="left", padx=20)
-        
-        # 按钮
+        # 按钮（从右往左排列）
         self.reload_btn = ctk.CTkButton(
             toolbar, text="重新加载", command=lambda: self._load_config(silent=False), width=100,
             font=(FONT_FAMILY, FONT_SIZE_NORMAL)
@@ -1852,6 +1926,17 @@ class App(ctk.CTk):
             fg_color="#D4A017", hover_color="#B8860B"
         )
         self.export_btn.pack(side="right", padx=5)
+        
+        # 状态栏（独立行，不遮挡按钮）
+        status_bar = ctk.CTkFrame(self, height=28, fg_color="transparent")
+        status_bar.pack(fill="x", padx=10)
+        status_bar.pack_propagate(False)
+        
+        self.status_label = ctk.CTkLabel(
+            status_bar, text="", font=(FONT_FAMILY, FONT_SIZE_SMALL),
+            anchor="w"
+        )
+        self.status_label.pack(side="left", padx=15)
         
         # 主内容区域 - 标签页
         self.tabview = ctk.CTkTabview(self)
@@ -1916,13 +2001,13 @@ class App(ctk.CTk):
                     content = f.read()
                     self.config = parse_jsonc(content)
             else:
-                self.config = {"$schema": "https://opencode.ai/config.json"}
+                self.config = {"$schema": _default_schema_url(self.brand)}
             
             # 加载 Provider 配置
             providers = self.config.get("provider", {})
             
             # 从 auth.json 加载 API Key
-            auth_data = load_auth_json()
+            auth_data = load_auth_json(self.brand)
             for name, provider in providers.items():
                 if name in auth_data and "key" in auth_data[name]:
                     provider.setdefault("options", {})["apiKey"] = auth_data[name]["key"]
@@ -1972,10 +2057,10 @@ class App(ctk.CTk):
             
             # 确保 $schema 存在
             if "$schema" not in existing_config:
-                existing_config["$schema"] = "https://opencode.ai/config.json"
+                existing_config["$schema"] = _default_schema_url(self.brand)
             
             # 加载现有 auth.json
-            auth_data = load_auth_json()
+            auth_data = load_auth_json(self.brand)
             
             # 获取我们管理的 provider 名称列表
             managed_provider_names = set(providers.keys()) if providers else set()
@@ -2063,7 +2148,7 @@ class App(ctk.CTk):
                 json.dump(existing_config, f, indent=2, ensure_ascii=False)
             
             # 保存 auth.json
-            save_auth_json(auth_data)
+            save_auth_json(auth_data, self.brand)
             
             # 更新内存中的配置
             self.config = existing_config
@@ -2072,6 +2157,22 @@ class App(ctk.CTk):
             
         except Exception as e:
             self.show_status(f"保存配置失败: {str(e)}", "error")
+
+    def _apply_brand(self, brand: str):
+        """切换 OpenCode / Kilo Code 品牌并同步 UI + 路径 + 重载配置"""
+        self.brand = brand
+        self.brand_var.set(brand)
+
+        app_title = f"{brand} 配置编辑器"
+        self.title(app_title)
+
+        self.config_path = _brand_config_path(brand)
+        self.agents_md_path = _brand_agents_md_path(brand)
+
+        self.config_path_label.configure(text=f"配置: {self.config_path}")
+        self.instructions_frame.switch_agents_path(self.agents_md_path)
+
+        self._load_config(silent=False)
     
     def _export_config(self):
         """导出配置（包含明文 API Key）"""
@@ -2095,7 +2196,7 @@ class App(ctk.CTk):
                 title="导出配置",
                 defaultextension=".json",
                 filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")],
-                initialfile="opencode-export.json"
+                initialfile=f"{self.brand.lower().replace(' ', '-')}-export.json"
             )
             
             if not file_path:
@@ -2111,7 +2212,7 @@ class App(ctk.CTk):
                     config = json.loads("\n".join(cleaned_lines))
             
             # 读取 auth.json
-            auth_data = load_auth_json()
+            auth_data = load_auth_json(self.brand)
             
             # 将 API Key 合并到配置中
             if "provider" in config:
