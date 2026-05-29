@@ -21,7 +21,7 @@ from tkinter import messagebox, filedialog
 # 常量定义
 APP_NAME = "OpenCode 配置编辑器"
 APP_VERSION = "1.0.0"
-WINDOW_SIZE = "1200x800"
+WINDOW_SIZE = "1600x900"
 
 # 字体配置
 FONT_FAMILY = "宋体"
@@ -99,7 +99,8 @@ def get_agents_md_path() -> Path:
 def _brand_auth_json_path(brand: str) -> Path:
     """获取指定品牌的 auth.json 路径"""
     if brand == "Kilo Code":
-        return Path.home() / ".config" / "kilo" / "auth.json"
+        # Kilo Code 实际使用 XDG_DATA_HOME 路径（非 XDG_CONFIG_HOME）
+        return Path.home() / ".local" / "share" / "kilo" / "auth.json"
     # OpenCode
     auth_path = os.environ.get("OPENCODE_AUTH_PATH")
     if auth_path:
@@ -874,6 +875,7 @@ class ProviderFrame(ctk.CTkFrame):
                         }
                 self._refresh_model_list()
                 self.app.show_status(f"已添加 {len(dialog.selected_models)} 个模型", "success")
+                self.app.schedule_auto_save()
     
     def _sync_current_provider(self):
         """同步当前 provider（如果编辑框有内容）"""
@@ -939,6 +941,7 @@ class ProviderFrame(ctk.CTkFrame):
             "models": {}
         }
         self._select_provider(name)  # 这会自动刷新列表
+        self.app.schedule_auto_save()
     
     def _remove_provider(self):
         """删除当前 Provider"""
@@ -948,6 +951,7 @@ class ProviderFrame(ctk.CTkFrame):
                 self.current_provider = None
                 self._refresh_provider_list()
                 self._clear_details()
+                self.app.schedule_auto_save()
     
     def _select_provider(self, name: str):
         """选择 Provider"""
@@ -1275,6 +1279,7 @@ class ProviderFrame(ctk.CTkFrame):
             if model_id in provider.get("models", {}):
                 del provider["models"][model_id]
                 self._refresh_model_list()
+                self.app.schedule_auto_save()
     
     def _add_variant_tag(self, parent, level: str, variant_widgets: list, thinking_field: str):
         """添加变体标签"""
@@ -1390,6 +1395,7 @@ class ProviderFrame(ctk.CTkFrame):
                 }
             }
             self._refresh_model_list()
+            self.app.schedule_auto_save()
     
     def _sync_ui_to_provider(self):
         """将 UI 数据同步到当前 provider"""
@@ -1673,12 +1679,14 @@ class McpCompactionFrame(ctk.CTkFrame):
         """切换 MCP 启用状态"""
         if name in self.mcp_servers:
             self.mcp_servers[name]["enabled"] = enabled
+            self.app.schedule_auto_save()
     
     def _remove_mcp(self, name: str):
         """删除 MCP"""
         if name in self.mcp_servers:
             del self.mcp_servers[name]
             self._refresh_mcp_list()
+            self.app.schedule_auto_save()
     
     def _add_mcp(self):
         """添加 MCP"""
@@ -1687,6 +1695,7 @@ class McpCompactionFrame(ctk.CTkFrame):
         if dialog.result:
             self.mcp_servers[dialog.result["name"]] = dialog.result["config"]
             self._refresh_mcp_list()
+            self.app.schedule_auto_save()
     
     def _import_mcp_json(self):
         """从 JSON 导入 MCP"""
@@ -1715,6 +1724,7 @@ class McpCompactionFrame(ctk.CTkFrame):
             if imported_count > 0:
                 self._refresh_mcp_list()
                 self.app.show_status(f"成功导入 {imported_count} 个 MCP", "success")
+                self.app.schedule_auto_save()
             else:
                 messagebox.showerror("错误", "未找到有效的 MCP 配置")
                 
@@ -1849,6 +1859,7 @@ class App(ctk.CTk):
         
         self.title(APP_NAME)
         self.geometry(WINDOW_SIZE)
+        self.minsize(1600, 900)
         
         # 设置主题
         ctk.set_appearance_mode("system")
@@ -1862,6 +1873,10 @@ class App(ctk.CTk):
         self.agents_md_path = get_agents_md_path()
         self.config = {}
         
+        # 自动保存状态
+        self.auto_save_var = ctk.BooleanVar(value=True)
+        self._auto_save_job = None
+        
         self._create_widgets()
         self._apply_brand("OpenCode")
         self._load_config(silent=True)
@@ -1869,8 +1884,8 @@ class App(ctk.CTk):
     def _create_widgets(self):
         """创建主界面组件"""
         # 顶部工具栏
-        toolbar = ctk.CTkFrame(self, height=55)
-        toolbar.pack(fill="x", padx=10, pady=5)
+        toolbar = ctk.CTkFrame(self, height=45)
+        toolbar.pack(fill="x", padx=10, pady=(5, 2))
         toolbar.pack_propagate(False)
         
         # 标题区域：品牌下拉融入标题
@@ -1896,9 +1911,18 @@ class App(ctk.CTk):
         # 配置文件路径显示
         self.config_path_label = ctk.CTkLabel(
             toolbar, text=f"配置: {self.config_path}",
-            font=(FONT_FAMILY, FONT_SIZE_SMALL), text_color="gray"
+            font=(FONT_FAMILY, FONT_SIZE_SMALL), text_color="gray",
+            width=350, anchor="w"
         )
-        self.config_path_label.pack(side="left", padx=20)
+        self.config_path_label.pack(side="left", padx=(20, 0))
+
+        # 自动保存开关
+        self.auto_save_cb = ctk.CTkCheckBox(
+            toolbar, text="自动保存", variable=self.auto_save_var,
+            font=(FONT_FAMILY, FONT_SIZE_SMALL),
+            checkbox_width=18, checkbox_height=18
+        )
+        self.auto_save_cb.pack(side="left", padx=10)
         
         # 按钮（从右往左排列）
         self.reload_btn = ctk.CTkButton(
@@ -1928,8 +1952,8 @@ class App(ctk.CTk):
         self.export_btn.pack(side="right", padx=5)
         
         # 状态栏（独立行，不遮挡按钮）
-        status_bar = ctk.CTkFrame(self, height=28, fg_color="transparent")
-        status_bar.pack(fill="x", padx=10)
+        status_bar = ctk.CTkFrame(self, height=24, fg_color="transparent")
+        status_bar.pack(fill="x", padx=10, pady=0)
         status_bar.pack_propagate(False)
         
         self.status_label = ctk.CTkLabel(
@@ -1940,7 +1964,7 @@ class App(ctk.CTk):
         
         # 主内容区域 - 标签页
         self.tabview = ctk.CTkTabview(self)
-        self.tabview.pack(fill="both", expand=True, padx=10, pady=5)
+        self.tabview.pack(fill="both", expand=True, padx=10, pady=(2, 5))
         
         # 创建标签页
         self.tab_provider = self.tabview.add("Provider 管理")
@@ -1968,13 +1992,33 @@ class App(ctk.CTk):
             "success": "green",
             "error": "red",
             "info": "gray",
-            "warning": "orange"
+            "warning": "#FFD700"
         }
         color = color_map.get(msg_type, "gray")
         self.status_label.configure(text=message, text_color=color)
         
         # 5秒后自动清除
         self.after(5000, lambda: self.status_label.configure(text=""))
+    
+    def schedule_auto_save(self, delay_ms: int = 1000):
+        """调度自动保存（防抖）"""
+        if not self.auto_save_var.get():
+            return
+        
+        # 取消之前的定时任务
+        if self._auto_save_job is not None:
+            self.after_cancel(self._auto_save_job)
+        
+        # 设置新的定时任务
+        self._auto_save_job = self.after(delay_ms, self._do_auto_save)
+    
+    def _do_auto_save(self):
+        """执行自动保存"""
+        self._auto_save_job = None
+        try:
+            self._save_config(silent=True)
+        except Exception as e:
+            print(f"自动保存失败: {e}")
     
     def _open_config_file(self):
         """打开配置文件"""
@@ -2037,7 +2081,7 @@ class App(ctk.CTk):
             self.show_status(f"加载配置失败: {str(e)}", "error")
             print(f"加载错误: {e}")  # 调试用
     
-    def _save_config(self):
+    def _save_config(self, silent: bool = False):
         """保存配置文件（精准编辑，不覆盖其他配置）"""
         try:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2099,6 +2143,9 @@ class App(ctk.CTk):
                     # 更新 models
                     existing_models = existing_provider.get("models", {})
                     
+                    # 收集 UI 中的模型 ID（用于删除不在列表中的模型）
+                    ui_model_ids = set(provider.get("models", {}).keys())
+                    
                     for model_id, model_data in provider.get("models", {}).items():
                         # 获取现有的 model 配置（保留其他字段）
                         existing_model = existing_models.get(model_id, {})
@@ -2119,6 +2166,11 @@ class App(ctk.CTk):
                             existing_model["variants"] = variants
                         
                         existing_models[model_id] = existing_model
+                    
+                    # 删除 UI 中已不存在的模型
+                    for model_id in list(existing_models.keys()):
+                        if model_id not in ui_model_ids:
+                            del existing_models[model_id]
                     
                     existing_provider["models"] = existing_models
                     existing_providers[name] = existing_provider
@@ -2153,7 +2205,11 @@ class App(ctk.CTk):
             # 更新内存中的配置
             self.config = existing_config
             
-            self.show_status("配置已保存", "success")
+            if not silent:
+                if self.brand == "Kilo Code":
+                    self.show_status("配置已保存 | 请在 VS Code 中按 Ctrl+R 重新加载窗口使配置生效", "warning")
+                else:
+                    self.show_status("配置已保存 | 请重启 OpenCode 或在 TUI 中输入 /reload 使配置生效", "warning")
             
         except Exception as e:
             self.show_status(f"保存配置失败: {str(e)}", "error")

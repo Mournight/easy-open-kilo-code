@@ -27,7 +27,7 @@
 | 维度 / 品牌 | OpenCode | Kilo Code |
 | :--- | :--- | :--- |
 | **主配置文件** | `~/.config/opencode/opencode.jsonc` | `~/.config/kilo/kilo.jsonc` |
-| **API 密钥库** | `~/.local/share/opencode/auth.json` | `~/.config/kilo/auth.json` |
+| **API 密钥库** | `~/.local/share/opencode/auth.json` | `~/.local/share/kilo/auth.json` |
 | **提示词文件** | `~/.config/opencode/AGENTS.md` | `~/.config/kilo/AGENTS.md` |
 | **$schema 规范**| `https://opencode.ai/config.json` | `https://app.kilo.ai/config.json` |
 
