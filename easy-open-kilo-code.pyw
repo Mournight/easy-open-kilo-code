@@ -34,6 +34,10 @@ FONT_SIZE_LARGE = 16
 FONT_SIZE_TITLE = 20
 FONT_SIZE_SMALL = 12
 
+# 按钮专用加粗字体
+BTN_FONT = (FONT_FAMILY, FONT_SIZE_NORMAL, "bold")
+BTN_FONT_SMALL = (FONT_FAMILY, FONT_SIZE_SMALL, "bold")
+
 # ████████████████████████████████████████████████████████████████████████████████
 # ██  JSON 解析工具
 # ████████████████████████████████████████████████████████████████████████████████
@@ -357,12 +361,12 @@ class ModelSelectorDialog(ctk.CTkToplevel):
         
         ctk.CTkButton(
             btn_frame, text="全选", command=self._select_all, width=60,
-            font=(FONT_FAMILY, FONT_SIZE_SMALL)
+            font=BTN_FONT_SMALL
         ).pack(side="left", padx=2)
         
         ctk.CTkButton(
             btn_frame, text="取消全选", command=self._deselect_all, width=80,
-            font=(FONT_FAMILY, FONT_SIZE_SMALL)
+            font=BTN_FONT_SMALL
         ).pack(side="left", padx=2)
         
         # 搜索过滤框
@@ -397,12 +401,12 @@ class ModelSelectorDialog(ctk.CTkToplevel):
         
         ctk.CTkButton(
             bottom_frame, text="取消", command=self._cancel, width=80,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         ).pack(side="right", padx=5)
         
         ctk.CTkButton(
             bottom_frame, text="确定", command=self._confirm, width=80,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL),
+            font=BTN_FONT,
             fg_color="green", hover_color="darkgreen"
         ).pack(side="right", padx=5)
     
@@ -547,12 +551,12 @@ class JsonImportDialog(ctk.CTkToplevel):
         
         ctk.CTkButton(
             btn_frame, text="取消", command=self._cancel, width=80,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         ).pack(side="right", padx=5)
         
         ctk.CTkButton(
             btn_frame, text="导入", command=self._confirm, width=80,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL),
+            font=BTN_FONT,
             fg_color="green", hover_color="darkgreen"
         ).pack(side="right", padx=5)
     
@@ -688,12 +692,12 @@ class McpEditDialog(ctk.CTkToplevel):
         
         ctk.CTkButton(
             btn_frame, text="取消", command=self._cancel, width=80,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         ).pack(side="right", padx=5)
         
         ctk.CTkButton(
             btn_frame, text="确定", command=self._confirm, width=80,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL),
+            font=BTN_FONT,
             fg_color="green", hover_color="darkgreen"
         ).pack(side="right", padx=5)
         
@@ -844,6 +848,14 @@ class ProviderFrame(ctk.CTkFrame):
         self.api_key_entry = ctk.CTkEntry(row, placeholder_text="sk-...", show="*", font=(FONT_FAMILY, FONT_SIZE_NORMAL))
         self.api_key_entry.pack(side="left", fill="x", expand=True, padx=5)
         
+        self._api_key_visible = False
+        self._toggle_key_btn = ctk.CTkButton(
+            row, text="显示", width=60,
+            command=self._toggle_api_key_visibility,
+            font=BTN_FONT_SMALL
+        )
+        self._toggle_key_btn.pack(side="left", padx=5)
+        
         # 模型配置区域标题和操作按钮
         model_header = ctk.CTkFrame(detail_frame)
         model_header.pack(fill="x", pady=(15, 5))
@@ -859,25 +871,25 @@ class ProviderFrame(ctk.CTkFrame):
         # Provider 操作按钮
         self.remove_provider_btn = ctk.CTkButton(
             model_header, text="删除 Provider", command=self._remove_provider, width=120,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL), fg_color="red", hover_color="darkred"
+            font=BTN_FONT, fg_color="red", hover_color="darkred"
         )
         self.remove_provider_btn.pack(side="right", padx=5)
         
         self.add_provider_btn = ctk.CTkButton(
             model_header, text="新建 Provider", command=self._add_provider, width=120,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         )
         self.add_provider_btn.pack(side="right", padx=5)
         
         self.add_model_btn = ctk.CTkButton(
             model_header, text="手动添加", command=self._add_model_manual, width=100,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         )
         self.add_model_btn.pack(side="right", padx=5)
         
         self.probe_btn = ctk.CTkButton(
             model_header, text="选择模型", command=self._select_models, width=100,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         )
         self.probe_btn.pack(side="right", padx=5)
         
@@ -952,6 +964,12 @@ class ProviderFrame(ctk.CTkFrame):
                             "modalities": {
                                 "input": ["text"],
                                 "output": ["text"]
+                            },
+                            "variants": {
+                                "high": {"reasoningEffort": "high"},
+                                "medium": {"reasoningEffort": "medium"},
+                                "low": {"reasoningEffort": "low"},
+                                "none": {"reasoningEffort": "none"}
                             }
                         }
                 self._refresh_model_list()
@@ -1059,6 +1077,16 @@ class ProviderFrame(ctk.CTkFrame):
             self.probe_status_label.configure(text="")
             self._refresh_model_list()
             self._refresh_provider_list()  # 更新高亮
+    
+    def _toggle_api_key_visibility(self):
+        """切换 API Key 显示/隐藏"""
+        self._api_key_visible = not self._api_key_visible
+        if self._api_key_visible:
+            self.api_key_entry.configure(show="")
+            self._toggle_key_btn.configure(text="隐藏")
+        else:
+            self.api_key_entry.configure(show="*")
+            self._toggle_key_btn.configure(text="显示")
     
     def _refresh_provider_list(self):
         """刷新 Provider 列表"""
@@ -1435,8 +1463,8 @@ class ProviderFrame(ctk.CTkFrame):
         btn_frame = ctk.CTkFrame(dialog)
         btn_frame.pack(pady=10)
         
-        ctk.CTkButton(btn_frame, text="取消", command=cancel, width=80, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left", padx=5)
-        ctk.CTkButton(btn_frame, text="确定", command=confirm, width=80, font=(FONT_FAMILY, FONT_SIZE_NORMAL), fg_color="green").pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="取消", command=cancel, width=80, font=BTN_FONT).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="确定", command=confirm, width=80, font=BTN_FONT, fg_color="green").pack(side="left", padx=5)
         
         # 绑定回车
         entry.bind("<Return>", lambda e: confirm())
@@ -1473,6 +1501,12 @@ class ProviderFrame(ctk.CTkFrame):
                 "modalities": {
                     "input": ["text"],
                     "output": ["text"]
+                },
+                "variants": {
+                    "high": {"reasoningEffort": "high"},
+                    "medium": {"reasoningEffort": "medium"},
+                    "low": {"reasoningEffort": "low"},
+                    "none": {"reasoningEffort": "none"}
                 }
             }
             self._refresh_model_list()
@@ -1627,12 +1661,12 @@ class McpCompactionFrame(ctk.CTkFrame):
         
         ctk.CTkButton(
             btn_row, text="添加 MCP", command=self._add_mcp, width=100,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         ).pack(side="left", padx=5)
         
         ctk.CTkButton(
             btn_row, text="JSON 导入", command=self._import_mcp_json, width=100,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL),
+            font=BTN_FONT,
             fg_color="#D4A017", hover_color="#B8860B"
         ).pack(side="left", padx=5)
         
@@ -1875,7 +1909,7 @@ class InstructionsFrame(ctk.CTkFrame):
         self.open_folder_btn = ctk.CTkButton(
             path_frame, text="打开目录", width=100,
             command=self._open_folder,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         )
         self.open_folder_btn.pack(side="right", padx=5)
         
@@ -1889,14 +1923,14 @@ class InstructionsFrame(ctk.CTkFrame):
         
         self.reload_btn = ctk.CTkButton(
             btn_frame, text="重新加载", command=self._load_file, width=120,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         )
         self.reload_btn.pack(side="left", padx=5)
         
         self.save_btn = ctk.CTkButton(
             btn_frame, text="保存提示词", command=self._save_file,
             fg_color="green", hover_color="darkgreen", width=120,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         )
         self.save_btn.pack(side="right", padx=5)
     
@@ -2034,19 +2068,19 @@ class App(ctk.CTk):
         self.save_btn = ctk.CTkButton(
             toolbar, text="保存配置", command=self._save_config,
             fg_color="green", hover_color="darkgreen", width=100,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         )
         self.save_btn.pack(side="right", padx=5)
         
         self.open_config_btn = ctk.CTkButton(
             toolbar, text="打开配置文件", command=self._open_config_file, width=120,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+            font=BTN_FONT
         )
         self.open_config_btn.pack(side="right", padx=5)
         
         self.export_btn = ctk.CTkButton(
             toolbar, text="导出配置", command=self._export_config, width=100,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL),
+            font=BTN_FONT,
             fg_color="#D4A017", hover_color="#B8860B"
         )
         self.export_btn.pack(side="right", padx=5)
