@@ -4,13 +4,13 @@
 [![Platform](https://img.shields.io/badge/platform-windows%20%7C%20macos%20%7C%20linux-lightgrey.svg)](https://github.com/easy-open-kilo-code)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-一个为 **OpenCode** 和 **Kilo Code** 打造的跨平台、高分屏（DPI）适配的图形化配置编辑器。支持一键切换品牌，自动更新实际读写路径，完美支持 MCP 服务器、上下文压缩、提供者模型、API 密钥与提示词文件的精细管理。
+一个为 **OpenCode** 和 **KiloCode** 打造的跨平台、高分屏（DPI）适配的图形化配置编辑器。支持一键切换品牌，自动更新实际读写路径，完美支持 MCP 服务器、上下文压缩、提供者模型、API 密钥与提示词文件的精细管理。
 
 ---
 
 ## ✨ 核心特性
 
-- **🏷️ 双品牌原生支持**：左上角首创“品牌融入标题”设计，支持在 **OpenCode** 与 **Kilo Code** 之间一键下拉切换。
+- **🏷️ 双品牌原生支持**：左上角首创“品牌融入标题”设计，支持在 **OpenCode** 与 **KiloCode** 之间一键下拉切换。
 - **🔄 路径与配置无缝重载**：切换品牌时，软件会自动、即时地更新所有 UI 路径、底层配置文件（`opencode.jsonc` ↔ `kilo.jsonc`）、密钥库（`auth.json`）和提示词（`AGENTS.md`），并自动加载对应配置。
 - **📊 缓冲区单位统一**：不仅上下文和最大输出，现在将“上下文压缩缓冲区”单位也全面统一为更易读的 **K (千字节/千 Token)**，保持界面参数展示的一致性。
 - **🌐 强大的 MCP 服务管理**：可视化管理 MCP (Model Context Protocol) 服务的类型（local/remote）、连接参数、启用状态，并提供 JSON 配置文件的精准导入与双击编辑功能。
@@ -24,7 +24,7 @@
 
 在切换品牌时，编辑器会自动读写以下对应的本地物理路径：
 
-| 维度 / 品牌 | OpenCode | Kilo Code |
+| 维度 / 品牌 | OpenCode | KiloCode |
 | :--- | :--- | :--- |
 | **主配置文件** | `~/.config/opencode/opencode.jsonc` | `~/.config/kilo/kilo.jsonc` |
 | **API 密钥库** | `~/.local/share/opencode/auth.json` | `~/.local/share/kilo/auth.json` |

@@ -78,6 +78,51 @@ def parse_jsonc(content: str) -> Dict:
     
     return json.loads(cleaned_content)
 
+def normalize_mcp_config(config: Dict) -> Dict:
+    """规范化 MCP 配置，兼容多种 IDE 格式（Cursor/Windsurf/OpenCode/KiloCode）"""
+    normalized = {}
+    
+    for name, server in config.items():
+        if not isinstance(server, dict):
+            continue
+        
+        entry = dict(server)  # 浅拷贝，避免修改原数据
+        
+        # 1. 自动推断 type
+        if "type" not in entry:
+            if "command" in entry:
+                entry["type"] = "local"
+            elif "url" in entry:
+                entry["type"] = "remote"
+            else:
+                continue  # 无法识别，跳过
+        
+        # 2. 规范化 local 类型的 command 字段
+        if entry["type"] == "local":
+            command = entry.get("command")
+            args = entry.get("args", [])
+            
+            # Cursor/Windsurf 格式：command 是字符串，args 是数组
+            if isinstance(command, str):
+                entry["command"] = [command] + (args if isinstance(args, list) else [])
+                if "args" in entry:
+                    del entry["args"]
+            
+            # 确保 command 是列表
+            if not isinstance(entry.get("command"), list):
+                continue  # 无效配置，跳过
+            
+            # 统一 environment -> env（OpenCode 用 environment，KiloCode 用 env）
+            # 两者都支持，不做转换
+        
+        # 3. 补全 enabled 字段（默认 true）
+        if "enabled" not in entry:
+            entry["enabled"] = True
+        
+        normalized[name] = entry
+    
+    return normalized
+
 # ████████████████████████████████████████████████████████████████████████████████
 # ██  配置路径工具函数
 # ████████████████████████████████████████████████████████████████████████████████
@@ -110,8 +155,8 @@ def get_agents_md_path() -> Path:
 
 def _brand_auth_json_path(brand: str) -> Path:
     """获取指定品牌的 auth.json 路径"""
-    if brand == "Kilo Code":
-        # Kilo Code 实际使用 XDG_DATA_HOME 路径（非 XDG_CONFIG_HOME）
+    if brand == "KiloCode":
+        # KiloCode 实际使用 XDG_DATA_HOME 路径（非 XDG_CONFIG_HOME）
         return Path.home() / ".local" / "share" / "kilo" / "auth.json"
     # OpenCode
     auth_path = os.environ.get("OPENCODE_AUTH_PATH")
@@ -471,7 +516,7 @@ class JsonImportDialog(ctk.CTkToplevel):
         # 说明标签
         ctk.CTkLabel(
             self, 
-            text="请粘贴 OpenCode / Kilo Code 标准 MCP JSON 配置（支持 mcpServers/mcp 包装）",
+            text="请粘贴 OpenCode / KiloCode 标准 MCP JSON 配置（支持 mcpServers/mcp 包装）",
             font=(FONT_FAMILY, FONT_SIZE_NORMAL)
         ).pack(padx=20, pady=(15, 5))
         
@@ -1754,12 +1799,14 @@ class McpCompactionFrame(ctk.CTkFrame):
             elif "mcp" in data:
                 data = data["mcp"]
             
+            # 规范化配置（兼容 Cursor/Windsurf/OpenCode/KiloCode 格式）
+            normalized = normalize_mcp_config(data)
+            
             # 导入 MCP 配置
             imported_count = 0
-            for name, config in data.items():
-                if isinstance(config, dict) and "type" in config:
-                    self.mcp_servers[name] = config
-                    imported_count += 1
+            for name, config in normalized.items():
+                self.mcp_servers[name] = config
+                imported_count += 1
             
             if imported_count > 0:
                 self._refresh_mcp_list()
@@ -1773,7 +1820,7 @@ class McpCompactionFrame(ctk.CTkFrame):
     
     def load_mcp(self, mcp: Dict):
         """加载 MCP 配置"""
-        self.mcp_servers = mcp
+        self.mcp_servers = normalize_mcp_config(mcp)
         self._refresh_mcp_list()
     
     def get_mcp(self) -> Dict:
@@ -1943,7 +1990,7 @@ class App(ctk.CTk):
         self.brand_var = ctk.StringVar(value=self.brand)
         self.brand_menu = ctk.CTkOptionMenu(
             title_frame,
-            values=["OpenCode", "Kilo Code"],
+            values=["OpenCode", "KiloCode"],
             variable=self.brand_var,
             command=self._apply_brand,
             width=160,
@@ -2251,7 +2298,7 @@ class App(ctk.CTk):
             self.config = existing_config
             
             if not silent:
-                if self.brand == "Kilo Code":
+                if self.brand == "KiloCode":
                     self.show_status("配置已保存 | 请按 Ctrl+Shift+P 输入 Reload Window 执行 Developer: Reload Window", "warning")
                 else:
                     self.show_status("配置已保存 | 请重启 OpenCode 或在 TUI 中输入 /reload 使配置生效", "warning")
@@ -2260,7 +2307,7 @@ class App(ctk.CTk):
             self.show_status(f"保存配置失败: {str(e)}", "error")
 
     def _apply_brand(self, brand: str):
-        """切换 OpenCode / Kilo Code 品牌并同步 UI + 路径 + 重载配置"""
+        """切换 OpenCode / KiloCode 品牌并同步 UI + 路径 + 重载配置"""
         self.brand = brand
         self.brand_var.set(brand)
 
