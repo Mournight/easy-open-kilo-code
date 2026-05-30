@@ -1972,9 +1972,14 @@ class App(ctk.CTk):
         self.auto_save_var = ctk.BooleanVar(value=True)
         self._auto_save_job = None
         
+        # 配置变更检测（轮询方式）
+        self._config_hash = ""
+        self._config_check_job = None
+        
         self._create_widgets()
         self._apply_brand("OpenCode")
         self._load_config(silent=True)
+        self._start_config_watch()
     
     def _create_widgets(self):
         """创建主界面组件"""
@@ -2111,6 +2116,37 @@ class App(ctk.CTk):
             self._save_config(silent=True)
         except Exception as e:
             print(f"自动保存失败: {e}")
+    
+    def _start_config_watch(self):
+        """启动配置变更轮询（每 2 秒检查一次）"""
+        self._config_hash = self._get_config_hash()
+        self._check_config_changes()
+    
+    def _get_config_hash(self) -> str:
+        """获取当前配置的哈希值（用于变更检测）"""
+        import hashlib
+        try:
+            # 获取 Provider 配置
+            providers = self.provider_frame.get_providers()
+            # 获取 MCP 和 compaction 配置
+            mcp = self.mcp_compaction_frame.get_mcp()
+            compaction = self.mcp_compaction_frame.get_compaction()
+            # 组合并计算哈希
+            snapshot = json.dumps({"p": providers, "m": mcp, "c": compaction}, sort_keys=True)
+            return hashlib.md5(snapshot.encode()).hexdigest()
+        except Exception:
+            return ""
+    
+    def _check_config_changes(self):
+        """定时检查配置是否有变化"""
+        # 未启用自动保存时，继续轮询但不执行保存
+        if self.auto_save_var.get():
+            new_hash = self._get_config_hash()
+            if new_hash and new_hash != self._config_hash:
+                self._config_hash = new_hash
+                self._do_auto_save()
+        # 每 1 秒检查一次
+        self._config_check_job = self.after(1000, self._check_config_changes)
     
     def _open_config_file(self):
         """打开配置文件"""
@@ -2296,6 +2332,9 @@ class App(ctk.CTk):
             
             # 更新内存中的配置
             self.config = existing_config
+            
+            # 更新配置哈希（避免重复触发自动保存）
+            self._config_hash = self._get_config_hash()
             
             if not silent:
                 if self.brand == "KiloCode":
