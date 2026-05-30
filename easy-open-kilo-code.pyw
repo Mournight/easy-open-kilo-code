@@ -18,6 +18,10 @@ from typing import Optional, Dict, List, Any
 import customtkinter as ctk
 from tkinter import messagebox, filedialog
 
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  常量定义
+# ████████████████████████████████████████████████████████████████████████████████
+
 # 常量定义
 APP_NAME = "OpenCode 配置编辑器"
 APP_VERSION = "1.0.0"
@@ -29,6 +33,10 @@ FONT_SIZE_NORMAL = 14
 FONT_SIZE_LARGE = 16
 FONT_SIZE_TITLE = 20
 FONT_SIZE_SMALL = 12
+
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  JSON 解析工具
+# ████████████████████████████████████████████████████████████████████████████████
 
 def parse_jsonc(content: str) -> Dict:
     """解析 JSONC 内容（支持注释和尾随逗号）"""
@@ -69,6 +77,10 @@ def parse_jsonc(content: str) -> Dict:
     cleaned_content = re.sub(r',\s*([}\]])', r'\1', cleaned_content)
     
     return json.loads(cleaned_content)
+
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  配置路径工具函数
+# ████████████████████████████████████████████████████████████████████████████████
 
 # OpenCode 配置路径
 def get_opencode_config_dir() -> Path:
@@ -177,6 +189,10 @@ def _parse_k_display(text: str, default_k_value: int) -> int:
         return default_k_value * 1000
     return number * 1000 if number <= 100000 else number
 
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  URL 处理工具函数
+# ████████████████████████████████████████████████████████████████████████████████
+
 def clean_base_url(url: str) -> str:
     """清洗 base URL，移除多余的斜杠"""
     url = url.rstrip("/")
@@ -203,6 +219,10 @@ def ensure_v1_in_url(url: str) -> str:
         url = url + "/v1"
     
     return url
+
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  模型探测函数
+# ████████████████████████████████████████████████████████████████████████████████
 
 def probe_models(base_url: str, api_key: str) -> List[Dict[str, Any]]:
     """探测可用模型"""
@@ -231,6 +251,10 @@ def probe_models(base_url: str, api_key: str) -> List[Dict[str, Any]]:
     except Exception as e:
         raise Exception(f"模型探测失败: {str(e)}")
 
+
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  模型选择对话框
+# ████████████████████████████████████████████████████████████████████████████████
 
 class ModelSelectorDialog(ctk.CTkToplevel):
     """模型选择对话框"""
@@ -418,6 +442,10 @@ class ModelSelectorDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  JSON 导入对话框
+# ████████████████████████████████████████████████████████████████████████████████
+
 class JsonImportDialog(ctk.CTkToplevel):
     """JSON 导入对话框"""
     
@@ -508,6 +536,10 @@ class JsonImportDialog(ctk.CTkToplevel):
         self.result = None
         self.destroy()
 
+
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  MCP 编辑对话框
+# ████████████████████████████████████████████████████████████████████████████████
 
 class McpEditDialog(ctk.CTkToplevel):
     """MCP 编辑对话框"""
@@ -694,6 +726,10 @@ class McpEditDialog(ctk.CTkToplevel):
         self.result = None
         self.destroy()
 
+
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  Provider 配置框架
+# ████████████████████████████████████████████████████████████████████████████████
 
 class ProviderFrame(ctk.CTkFrame):
     """Provider 配置框架"""
@@ -1513,6 +1549,10 @@ class ProviderFrame(ctk.CTkFrame):
         return filtered
 
 
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  MCP 服务器和上下文压缩配置框架
+# ████████████████████████████████████████████████████████████████████████████████
+
 class McpCompactionFrame(ctk.CTkFrame):
     """MCP 服务器和上下文压缩配置框架"""
     
@@ -1758,6 +1798,10 @@ class McpCompactionFrame(ctk.CTkFrame):
         }
 
 
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  提示词文件编辑框架
+# ████████████████████████████████████████████████████████████████████████████████
+
 class InstructionsFrame(ctk.CTkFrame):
     """提示词文件编辑框架"""
     
@@ -1850,6 +1894,10 @@ class InstructionsFrame(ctk.CTkFrame):
         self.path_label.configure(text=str(self.agents_md_path))
         self._load_file()
 
+
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  主应用窗口
+# ████████████████████████████████████████████████████████████████████████████████
 
 class App(ctk.CTk):
     """主应用窗口"""
@@ -2294,6 +2342,10 @@ class App(ctk.CTk):
         except Exception as e:
             self.show_status(f"导出失败: {str(e)}", "error")
 
+
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  程序入口
+# ████████████████████████████████████████████████████████████████████████████████
 
 def main():
     """主函数"""
