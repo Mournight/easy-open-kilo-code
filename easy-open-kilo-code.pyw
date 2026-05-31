@@ -2084,6 +2084,13 @@ class App(ctk.CTk):
             fg_color="#D4A017", hover_color="#B8860B"
         )
         self.export_btn.pack(side="right", padx=5)
+
+        self.sync_btn = ctk.CTkButton(
+            toolbar, text="同步到...", command=self._sync_to_other_brand, width=100,
+            font=BTN_FONT,
+            fg_color="#6A5ACD", hover_color="#483D8B"
+        )
+        self.sync_btn.pack(side="right", padx=5)
         
         # 状态栏（独立行，不遮挡按钮）
         status_bar = ctk.CTkFrame(self, height=24, fg_color="transparent")
@@ -2379,6 +2386,76 @@ class App(ctk.CTk):
         except Exception as e:
             self.show_status(f"保存配置失败: {str(e)}", "error")
 
+    def _sync_to_other_brand(self):
+        """同步当前配置到另一个品牌"""
+        target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
+        
+        warning_msg = (
+            f"⚠️ 警告 ⚠️\n\n"
+            f"将用当前 {self.brand} 的配置覆盖 {target_brand} 的配置！\n\n"
+            f"这包括：\n"
+            f"• Provider 配置\n"
+            f"• MCP 服务器配置\n"
+            f"• 上下文压缩配置\n"
+            f"• API 密钥\n"
+            f"• 全局提示词 (AGENTS.md)\n\n"
+            f"确定要继续吗？"
+        )
+        
+        if not messagebox.askyesno("确认同步", warning_msg):
+            return
+        
+        try:
+            # 获取当前配置
+            current_config = self.config.copy()
+            
+            # 获取目标品牌配置路径
+            target_config_path = _brand_config_path(target_brand)
+            target_auth_path = _brand_auth_json_path(target_brand)
+            target_agents_path = _brand_agents_md_path(target_brand)
+            
+            # 确保目标目录存在
+            target_config_path.parent.mkdir(parents=True, exist_ok=True)
+            target_auth_path.parent.mkdir(parents=True, exist_ok=True)
+            target_agents_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 读取目标配置（如果存在）
+            target_config = {}
+            if target_config_path.exists():
+                try:
+                    with open(target_config_path, "r", encoding="utf-8") as f:
+                        target_config = parse_jsonc(f.read())
+                except:
+                    pass
+            
+            # 合并配置（保留目标品牌的 $schema）
+            target_schema = _default_schema_url(target_brand)
+            target_config["$schema"] = target_schema
+            
+            # 复制 provider、mcp、compaction 配置
+            for key in ["provider", "mcp", "compaction"]:
+                if key in current_config:
+                    target_config[key] = current_config[key]
+            
+            # 保存目标配置
+            with open(target_config_path, "w", encoding="utf-8") as f:
+                json.dump(target_config, f, indent=2, ensure_ascii=False)
+            
+            # 同步 auth.json
+            current_auth = load_auth_json(self.brand)
+            if current_auth:
+                save_auth_json(current_auth, target_brand)
+            
+            # 同步 AGENTS.md
+            if self.agents_md_path.exists():
+                content = self.agents_md_path.read_text(encoding="utf-8")
+                target_agents_path.write_text(content, encoding="utf-8")
+            
+            self.show_status(f"已同步配置到 {target_brand}", "success")
+            
+        except Exception as e:
+            self.show_status(f"同步失败: {str(e)}", "error")
+    
     def _apply_brand(self, brand: str):
         """切换 OpenCode / KiloCode 品牌并同步 UI + 路径 + 重载配置"""
         self.brand = brand
