@@ -17,6 +17,7 @@ from typing import Optional, Dict, List, Any
 
 import customtkinter as ctk
 from tkinter import messagebox, filedialog
+import platformdirs
 
 # ████████████████████████████████████████████████████████████████████████████████
 # ██  常量定义
@@ -130,6 +131,26 @@ def normalize_mcp_config(config: Dict) -> Dict:
 # ████████████████████████████████████████████████████████████████████████████████
 # ██  配置路径工具函数
 # ████████████████████████████████████████████████████████████████████████████████
+
+# 程序配置目录（使用 platformdirs 确保跨平台兼容）
+APP_CONFIG_DIR = Path(platformdirs.user_config_dir("easy-open-kilo-code"))
+APP_CONFIG_FILE = APP_CONFIG_DIR / "app-settings.json"
+
+def load_app_settings() -> Dict:
+    """加载程序设置"""
+    if APP_CONFIG_FILE.exists():
+        try:
+            with open(APP_CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+def save_app_settings(settings: Dict):
+    """保存程序设置"""
+    APP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(APP_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
 
 # OpenCode 配置路径
 def get_opencode_config_dir() -> Path:
@@ -966,6 +987,7 @@ class ProviderFrame(ctk.CTkFrame):
                                 "output": ["text"]
                             },
                             "variants": {
+                                "xhigh": {"reasoningEffort": "xhigh"},
                                 "high": {"reasoningEffort": "high"},
                                 "medium": {"reasoningEffort": "medium"},
                                 "low": {"reasoningEffort": "low"},
@@ -1503,6 +1525,7 @@ class ProviderFrame(ctk.CTkFrame):
                     "output": ["text"]
                 },
                 "variants": {
+                    "xhigh": {"reasoningEffort": "xhigh"},
                     "high": {"reasoningEffort": "high"},
                     "medium": {"reasoningEffort": "medium"},
                     "low": {"reasoningEffort": "low"},
@@ -1917,6 +1940,10 @@ class InstructionsFrame(ctk.CTkFrame):
         self.text_editor = ctk.CTkTextbox(self, wrap="word", font=(FONT_FAMILY, FONT_SIZE_NORMAL))
         self.text_editor.pack(fill="both", expand=True, padx=20, pady=10)
         
+        # 修复粘贴重复问题：手动处理粘贴事件
+        self.text_editor.bind("<Control-v>", self._on_paste)
+        self.text_editor.bind("<Control-V>", self._on_paste)
+        
         # 按钮框架
         btn_frame = ctk.CTkFrame(self)
         btn_frame.pack(fill="x", padx=20, pady=10)
@@ -1933,6 +1960,25 @@ class InstructionsFrame(ctk.CTkFrame):
             font=BTN_FONT
         )
         self.save_btn.pack(side="right", padx=5)
+    
+    def _on_paste(self, event=None):
+        """处理粘贴事件，修复 CTkTextbox 粘贴重复问题"""
+        try:
+            # 删除选中的文本
+            try:
+                self.text_editor.delete("sel.first", "sel.last")
+            except:
+                pass
+            
+            # 获取剪贴板内容
+            clipboard = self.clipboard_get()
+            
+            # 插入剪贴板内容
+            self.text_editor.insert("insert", clipboard)
+            
+            return "break"  # 阻止默认的粘贴行为
+        except:
+            return None
     
     def _load_file(self):
         """加载文件内容"""
@@ -1994,24 +2040,30 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("system")
         ctk.set_default_color_theme("blue")
         
-        # 品牌状态（默认 OpenCode）
-        self.brand = "OpenCode"
+        # 加载程序设置
+        self._app_settings = load_app_settings()
+        
+        # 品牌状态（从设置加载，默认 OpenCode）
+        self.brand = self._app_settings.get("brand", "OpenCode")
         
         # 配置文件路径
         self.config_path = get_opencode_config_path()
         self.agents_md_path = get_agents_md_path()
         self.config = {}
         
-        # 自动保存状态
-        self.auto_save_var = ctk.BooleanVar(value=True)
+        # 自动保存状态（从设置加载）
+        self.auto_save_var = ctk.BooleanVar(value=self._app_settings.get("auto_save", True))
         self._auto_save_job = None
+        
+        # 同步修改状态（从设置加载）
+        self.sync_enabled_var = ctk.BooleanVar(value=self._app_settings.get("sync_enabled", False))
         
         # 配置变更检测（轮询方式）
         self._config_hash = ""
         self._config_check_job = None
         
         self._create_widgets()
-        self._apply_brand("OpenCode")
+        self._apply_brand(self.brand)
         self._load_config(silent=True)
         self._start_config_watch()
     
@@ -2054,9 +2106,19 @@ class App(ctk.CTk):
         self.auto_save_cb = ctk.CTkCheckBox(
             toolbar, text="自动保存", variable=self.auto_save_var,
             font=(FONT_FAMILY, FONT_SIZE_SMALL),
-            checkbox_width=18, checkbox_height=18
+            checkbox_width=18, checkbox_height=18,
+            command=self._on_auto_save_changed
         )
         self.auto_save_cb.pack(side="left", padx=10)
+
+        # 同步修改开关
+        self.sync_enabled_cb = ctk.CTkCheckBox(
+            toolbar, text="同步修改", variable=self.sync_enabled_var,
+            font=(FONT_FAMILY, FONT_SIZE_SMALL),
+            checkbox_width=18, checkbox_height=18,
+            command=self._on_sync_enabled_changed
+        )
+        self.sync_enabled_cb.pack(side="left", padx=10)
         
         # 按钮（从右往左排列）
         self.reload_btn = ctk.CTkButton(
@@ -2137,6 +2199,42 @@ class App(ctk.CTk):
         }
         color = color_map.get(msg_type, "gray")
         self.status_label.configure(text=message, text_color=color)
+    
+    def _save_app_settings(self):
+        """保存程序设置"""
+        settings = {
+            "brand": self.brand,
+            "auto_save": self.auto_save_var.get(),
+            "sync_enabled": self.sync_enabled_var.get()
+        }
+        save_app_settings(settings)
+    
+    def _on_auto_save_changed(self):
+        """自动保存开关变化时"""
+        self._save_app_settings()
+    
+    def _on_sync_enabled_changed(self):
+        """同步修改开关变化时"""
+        if self.sync_enabled_var.get():
+            target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
+            warning_msg = (
+                f"⚠️ 提示 ⚠️\n\n"
+                f"开启同步修改后，所有配置变更将同时写入 {self.brand} 和 {target_brand}！\n\n"
+                f"这包括：\n"
+                f"• Provider 配置\n"
+                f"• MCP 服务器配置\n"
+                f"• 上下文压缩配置\n"
+                f"• API 密钥\n"
+                f"• 全局提示词 (AGENTS.md)\n\n"
+                f"点击「是」将立即执行一次同步覆盖，确保两边配置一致。\n\n"
+                f"确定要继续吗？"
+            )
+            if not messagebox.askyesno("确认开启同步", warning_msg):
+                self.sync_enabled_var.set(False)
+                return
+            # 立即执行一次同步
+            self._do_sync_to_other_brand()
+        self._save_app_settings()
     
     def schedule_auto_save(self, delay_ms: int = 1000):
         """调度自动保存（防抖）"""
@@ -2377,6 +2475,10 @@ class App(ctk.CTk):
             # 更新配置哈希（避免重复触发自动保存）
             self._config_hash = self._get_config_hash()
             
+            # 如果启用了同步修改，同步到另一个品牌
+            if self.sync_enabled_var.get():
+                self._sync_config_to_other_brand(existing_config, auth_data)
+            
             if not silent:
                 if self.brand == "KiloCode":
                     self.show_status("配置已保存 | 请按 Ctrl+Shift+P 输入 Reload Window 执行 Developer: Reload Window", "warning")
@@ -2386,30 +2488,10 @@ class App(ctk.CTk):
         except Exception as e:
             self.show_status(f"保存配置失败: {str(e)}", "error")
 
-    def _sync_to_other_brand(self):
-        """同步当前配置到另一个品牌"""
-        target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
-        
-        warning_msg = (
-            f"⚠️ 警告 ⚠️\n\n"
-            f"将用当前 {self.brand} 的配置覆盖 {target_brand} 的配置！\n\n"
-            f"这包括：\n"
-            f"• Provider 配置\n"
-            f"• MCP 服务器配置\n"
-            f"• 上下文压缩配置\n"
-            f"• API 密钥\n"
-            f"• 全局提示词 (AGENTS.md)\n\n"
-            f"确定要继续吗？"
-        )
-        
-        if not messagebox.askyesno("确认同步", warning_msg):
-            return
-        
+    def _sync_config_to_other_brand(self, config: Dict, auth_data: Dict):
+        """内部同步方法（精准合并，保留目标品牌不支持编辑的字段）"""
         try:
-            # 获取当前配置
-            current_config = self.config.copy()
-            
-            # 获取目标品牌配置路径
+            target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
             target_config_path = _brand_config_path(target_brand)
             target_auth_path = _brand_auth_json_path(target_brand)
             target_agents_path = _brand_agents_md_path(target_brand)
@@ -2428,28 +2510,157 @@ class App(ctk.CTk):
                 except:
                     pass
             
-            # 合并配置（保留目标品牌的 $schema）
-            target_schema = _default_schema_url(target_brand)
-            target_config["$schema"] = target_schema
+            # 保留目标品牌的 $schema
+            target_config["$schema"] = _default_schema_url(target_brand)
             
-            # 复制 provider、mcp、compaction 配置
-            for key in ["provider", "mcp", "compaction"]:
-                if key in current_config:
-                    target_config[key] = current_config[key]
+            # 精准合并 provider 配置（保留目标品牌不支持编辑的字段）
+            if "provider" in config:
+                source_providers = config["provider"]
+                target_providers = target_config.get("provider", {})
+                
+                for name, source_provider in source_providers.items():
+                    if name in target_providers:
+                        # 已存在：精准合并，保留目标品牌的其他字段
+                        target_provider = target_providers[name]
+                        
+                        # 更新 name
+                        if "name" in source_provider:
+                            target_provider["name"] = source_provider["name"]
+                        
+                        # 更新 options（只更新 baseURL，保留其他 options）
+                        if "options" in source_provider:
+                            target_options = target_provider.get("options", {})
+                            target_options["baseURL"] = source_provider["options"].get("baseURL", "")
+                            target_provider["options"] = target_options
+                        
+                        # 精准合并 models
+                        if "models" in source_provider:
+                            source_models = source_provider["models"]
+                            target_models = target_provider.get("models", {})
+                            
+                            for model_id, source_model in source_models.items():
+                                target_model = target_models.get(model_id, {})
+                                
+                                # 更新支持的字段
+                                if "name" in source_model:
+                                    target_model["name"] = source_model["name"]
+                                if "limit" in source_model:
+                                    target_model["limit"] = source_model["limit"]
+                                if "modalities" in source_model:
+                                    target_model["modalities"] = source_model["modalities"]
+                                if "options" in source_model:
+                                    target_model["options"] = source_model["options"]
+                                if "variants" in source_model:
+                                    target_model["variants"] = source_model["variants"]
+                                
+                                target_models[model_id] = target_model
+                            
+                            # 删除源配置中不存在的模型
+                            for model_id in list(target_models.keys()):
+                                if model_id not in source_models:
+                                    del target_models[model_id]
+                            
+                            target_provider["models"] = target_models
+                        
+                        target_providers[name] = target_provider
+                    else:
+                        # 不存在：直接添加
+                        target_providers[name] = source_provider
+                
+                # 删除源配置中不存在的 provider
+                for name in list(target_providers.keys()):
+                    if name not in source_providers:
+                        del target_providers[name]
+                
+                target_config["provider"] = target_providers
+            
+            # 精准合并 MCP 配置
+            if "mcp" in config:
+                source_mcp = config["mcp"]
+                target_mcp = target_config.get("mcp", {})
+                
+                for name, source_server in source_mcp.items():
+                    if name in target_mcp:
+                        # 已存在：合并，保留目标品牌的其他字段
+                        target_server = target_mcp[name]
+                        for key in ["type", "command", "url", "enabled", "environment", "env", "headers"]:
+                            if key in source_server:
+                                target_server[key] = source_server[key]
+                        target_mcp[name] = target_server
+                    else:
+                        # 不存在：直接添加
+                        target_mcp[name] = source_server
+                
+                # 删除源配置中不存在的 MCP
+                for name in list(target_mcp.keys()):
+                    if name not in source_mcp:
+                        del target_mcp[name]
+                
+                target_config["mcp"] = target_mcp
+            
+            # 更新 compaction 配置（直接覆盖，因为这是我们完全支持的）
+            if "compaction" in config:
+                target_config["compaction"] = config["compaction"]
             
             # 保存目标配置
             with open(target_config_path, "w", encoding="utf-8") as f:
                 json.dump(target_config, f, indent=2, ensure_ascii=False)
             
             # 同步 auth.json
-            current_auth = load_auth_json(self.brand)
-            if current_auth:
-                save_auth_json(current_auth, target_brand)
+            if auth_data:
+                save_auth_json(auth_data, target_brand)
             
             # 同步 AGENTS.md
             if self.agents_md_path.exists():
                 content = self.agents_md_path.read_text(encoding="utf-8")
                 target_agents_path.write_text(content, encoding="utf-8")
+            
+        except Exception as e:
+            print(f"同步到 {target_brand} 失败: {e}")
+
+    def _do_sync_to_other_brand(self):
+        """执行同步到另一个品牌（带状态提示）"""
+        try:
+            target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
+            
+            # 获取当前配置
+            current_config = self.config.copy()
+            current_auth = load_auth_json(self.brand)
+            
+            # 调用内部同步方法
+            self._sync_config_to_other_brand(current_config, current_auth)
+            
+            self.show_status(f"已同步配置到 {target_brand}", "success")
+        except Exception as e:
+            self.show_status(f"同步失败: {str(e)}", "error")
+
+    def _sync_to_other_brand(self):
+        """同步当前配置到另一个品牌（手动触发，带确认对话框）"""
+        target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
+        
+        warning_msg = (
+            f"⚠️ 警告 ⚠️\n\n"
+            f"将用当前 {self.brand} 的配置精准合并到 {target_brand} 的配置！\n\n"
+            f"这包括：\n"
+            f"• Provider 配置（精准合并，保留目标品牌特有字段）\n"
+            f"• MCP 服务器配置（精准合并）\n"
+            f"• 上下文压缩配置\n"
+            f"• API 密钥\n"
+            f"• 全局提示词 (AGENTS.md)\n\n"
+            f"目标品牌中不支持编辑的字段将被保留。\n\n"
+            f"确定要继续吗？"
+        )
+        
+        if not messagebox.askyesno("确认同步", warning_msg):
+            return
+        
+        try:
+            # 获取当前配置
+            current_config = self.config.copy()
+            current_auth = load_auth_json(self.brand)
+            
+            # 调用内部同步方法（精准合并）
+            self._sync_config_to_other_brand(current_config, current_auth)
             
             self.show_status(f"已同步配置到 {target_brand}", "success")
             
@@ -2469,6 +2680,9 @@ class App(ctk.CTk):
 
         self.config_path_label.configure(text=f"配置: {self.config_path}")
         self.instructions_frame.switch_agents_path(self.agents_md_path)
+
+        # 保存品牌选择
+        self._save_app_settings()
 
         self._load_config(silent=False)
     
