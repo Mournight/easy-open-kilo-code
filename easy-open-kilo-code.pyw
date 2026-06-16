@@ -1252,6 +1252,18 @@ class ProviderFrame(ctk.CTkFrame):
         think_field_entry.pack(side="left", padx=3)
         think_field_entry.insert(0, thinking_field)
         
+        # 新增：禁用/启用变体按钮
+        variants_disabled = "variants" not in model_config
+        
+        toggle_btn = ctk.CTkButton(
+            row3, text="🚫" if variants_disabled else "✓", 
+            width=30,
+            fg_color="#F44336" if variants_disabled else "#4CAF50",
+            command=lambda idx=len(self.model_entries): self._toggle_variants(idx),
+            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
+        )
+        toggle_btn.pack(side="left", padx=3)
+        
         # 变体容器
         variants_frame = ctk.CTkFrame(row3)
         variants_frame.pack(side="left", fill="x", expand=True, padx=5)
@@ -1264,8 +1276,8 @@ class ProviderFrame(ctk.CTkFrame):
             # Response 模式，只有一个强度
             variant_levels = [model_config["options"][thinking_field]]
         
-        # 如果没有变体，使用默认值
-        if not variant_levels:
+        # 如果没有变体，使用默认值（仅当不是禁用状态时）
+        if not variant_levels and not variants_disabled:
             variant_levels = ["high"]
         
         # 变体标签和删除按钮
@@ -1291,8 +1303,47 @@ class ProviderFrame(ctk.CTkFrame):
             "think_field_entry": think_field_entry,
             "variants_frame": variants_frame,
             "variant_widgets": variant_widgets,
+            "variants_disabled": variants_disabled,
+            "toggle_btn": toggle_btn,
+            "add_variant_btn": add_variant_btn,
             "original_id": model_id
         })
+        
+        # 初始状态下应用禁用状态
+        if variants_disabled:
+            self._apply_variants_disabled_state(len(self.model_entries) - 1, True)
+    
+    def _toggle_variants(self, entry_idx: int):
+        """切换变体的禁用/启用状态"""
+        entry = self.model_entries[entry_idx]
+        is_disabled = not entry.get("variants_disabled", False)
+        entry["variants_disabled"] = is_disabled
+        self._apply_variants_disabled_state(entry_idx, is_disabled)
+    
+    def _apply_variants_disabled_state(self, entry_idx: int, disabled: bool):
+        """应用变体禁用状态到 UI"""
+        entry = self.model_entries[entry_idx]
+        tf = entry["think_field_entry"]
+        af = entry["add_variant_btn"]
+        vf = entry["variants_frame"]
+        btn = entry["toggle_btn"]
+        
+        if disabled:
+            tf.configure(state="disabled")
+            af.configure(state="disabled")
+            # 禁用变体标签内的所有控件
+            for tag_frame in vf.winfo_children():
+                for widget in tag_frame.winfo_children():
+                    widget.configure(state="disabled")
+            btn.configure(text="🚫", fg_color="#F44336")
+        else:
+            tf.configure(state="normal")
+            af.configure(state="normal")
+            # 启用变体标签内的所有控件
+            for tag_frame in vf.winfo_children():
+                for widget in tag_frame.winfo_children():
+                    widget.configure(state="normal")
+            btn.configure(text="✓", fg_color="#4CAF50")
     
     def _test_model(self, model_id: str, btn: ctk.CTkButton):
         """测试模型连通性"""
@@ -1409,7 +1460,7 @@ class ProviderFrame(ctk.CTkFrame):
             provider = self.providers[self.current_provider]
             if model_id in provider.get("models", {}):
                 del provider["models"][model_id]
-                self._refresh_model_list()
+                self.after(10, self._refresh_model_list)
                 self.app.schedule_auto_save()
     
     def _add_variant_tag(self, parent, level: str, variant_widgets: list, thinking_field: str):
@@ -1590,7 +1641,8 @@ class ProviderFrame(ctk.CTkFrame):
                 }
                 
                 # 生成变体配置（两种模式都使用 variants）
-                if thinking_field and variant_levels:
+                # 仅在未禁用时生成
+                if not entry.get("variants_disabled", False) and thinking_field and variant_levels:
                     variants = {}
                     for level in variant_levels:
                         variants[level] = {thinking_field: level}

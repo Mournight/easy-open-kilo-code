@@ -54,6 +54,11 @@ python easy-open-kilo-code.pyw
   - 图像输入支持
   - 推理字段名（reasoningEffort / thinking）
   - 5 个推理强度变体（xhigh / high / medium / low / none）
+  - **变体开关**（🚫/✓ 按钮）：一键禁用/启用该模型的推理变体配置
+    - 🚫（红色）：禁用变体，保存时不写入 `variants` 字段，适用于不支持 `reasoning_effort` 的模型（如 NVIDIA NIM）
+    - ✓（绿色）：启用变体，正常保存推理强度配置
+    - 新添加的模型默认启用变体（自动带 `high` 强度）
+    - 从配置文件加载时，已有 `variants` 的模型自动启用，无 `variants` 的自动禁用
 
 ### 2. MCP 与上下文
 - 一键导入 MCP 配置，支持多种格式：
