@@ -53,7 +53,7 @@ python easy-open-kilo-code.pyw
   - 上下文大小（K）、最大输出
   - 图像输入支持
   - 推理字段名（reasoningEffort / thinking）
-  - 5 个推理强度变体（xhigh / high / medium / low / none）
+  - 6 个推理强度变体（max / xhigh / high / medium / low / none）
   - **变体开关**（🚫/✓ 按钮）：一键禁用/启用该模型的推理变体配置
     - 🚫（红色）：禁用变体，保存时不写入 `variants` 字段，适用于不支持 `reasoning_effort` 的模型（如 NVIDIA NIM）
     - ✓（绿色）：启用变体，正常保存推理强度配置

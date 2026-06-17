@@ -986,13 +986,14 @@ class ProviderFrame(ctk.CTkFrame):
                                 "input": ["text"],
                                 "output": ["text"]
                             },
-                            "variants": {
-                                "xhigh": {"reasoningEffort": "xhigh"},
-                                "high": {"reasoningEffort": "high"},
-                                "medium": {"reasoningEffort": "medium"},
-                                "low": {"reasoningEffort": "low"},
-                                "none": {"reasoningEffort": "none"}
-                            }
+                                "variants": {
+                                    "max": {"reasoningEffort": "max"},
+                                    "xhigh": {"reasoningEffort": "xhigh"},
+                                    "high": {"reasoningEffort": "high"},
+                                    "medium": {"reasoningEffort": "medium"},
+                                    "low": {"reasoningEffort": "low"},
+                                    "none": {"reasoningEffort": "none"}
+                                }
                         }
                 self._refresh_model_list()
                 self.app.show_status(f"已添加 {len(dialog.selected_models)} 个模型", "success")
@@ -1492,7 +1493,7 @@ class ProviderFrame(ctk.CTkFrame):
         existing_levels = [l for _, l in variant_widgets]
         
         # 可选的强度
-        all_levels = ["none", "minimal", "low", "medium", "high", "xhigh"]
+        all_levels = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
         available_levels = [l for l in all_levels if l not in existing_levels]
         
         if not available_levels:
@@ -1576,6 +1577,7 @@ class ProviderFrame(ctk.CTkFrame):
                     "output": ["text"]
                 },
                 "variants": {
+                    "max": {"reasoningEffort": "max"},
                     "xhigh": {"reasoningEffort": "xhigh"},
                     "high": {"reasoningEffort": "high"},
                     "medium": {"reasoningEffort": "medium"},
