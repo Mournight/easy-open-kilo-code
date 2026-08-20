@@ -48,7 +48,10 @@ python easy-open-kilo-code.pyw
 - 支持创建、删除、重命名 Provider
 - 自动探测服务端支持的模型列表
 - 连通性测试和流式输出测速
-- 支持 OpenAI 标准协议和 Responses 专有协议
+- 支持 OpenAI Compatible、OpenAI Responses、原生 Gemini 和原生 Grok 协议
+- 根据协议自动补全 API 版本端点（原生 Gemini 使用 `/v1beta`，其余协议使用 `/v1`）
+- 原生 Gemini 请求使用 `/v1beta/models/{模型}:generateContent`，不会拼接 `/chat/completions`
+- 原生 Grok 按 OpenCode 的 `@ai-sdk/xai` 默认使用 `/v1/responses`
 - 每个模型支持配置：
   - 上下文大小（K）、最大输出
   - 图像输入支持

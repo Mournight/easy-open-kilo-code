@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import platform
+import re
 import threading
 import time
 import requests
@@ -39,14 +40,81 @@ FONT_SIZE_SMALL = 12
 BTN_FONT = (FONT_FAMILY, FONT_SIZE_NORMAL, "bold")
 BTN_FONT_SMALL = (FONT_FAMILY, FONT_SIZE_SMALL, "bold")
 
+# Provider 协议统一定义，避免 UI、保存和请求逻辑各自维护映射。
+PROTOCOLS = {
+    "openai_standard": {
+        "npm": "@ai-sdk/openai-compatible",
+        "api_version": "v1",
+    },
+    "openai_response": {
+        "npm": "@ai-sdk/openai",
+        "api_version": "v1",
+    },
+    "gemini_native": {
+        "npm": "@ai-sdk/google",
+        "api_version": "v1beta",
+    },
+    "grok_native": {
+        "npm": "@ai-sdk/xai",
+        "api_version": "v1",
+    },
+}
+
+
+def npm_for_protocol(protocol: str) -> str:
+    """返回协议对应的 OpenCode AI SDK 包。"""
+    return PROTOCOLS.get(protocol, PROTOCOLS["openai_standard"])["npm"]
+
+
+def protocol_for_npm(npm_package: str) -> str:
+    """根据 OpenCode Provider 的 npm 包反推界面协议。"""
+    for protocol, config in PROTOCOLS.items():
+        if config["npm"] == npm_package:
+            return protocol
+    return "openai_standard"
+
+
+def default_model_variants(protocol: str, model_id: str) -> Dict[str, Dict[str, Any]]:
+    """生成与 OpenCode Provider 转换逻辑一致的默认思考变体。"""
+    if protocol == "gemini_native":
+        return {
+            level: {
+                "thinkingConfig": {"includeThoughts": True, "thinkingLevel": level}
+            }
+            for level in ["low", "medium", "high"]
+        }
+
+    return {
+        level: {"reasoningEffort": level}
+        for level in ["max", "xhigh", "high", "medium", "low", "none"]
+    }
+
+
+def thinking_field_for_model(protocol: str, model_id: str) -> str:
+    """返回界面展示的协议原生思考控制字段。"""
+    if protocol == "gemini_native":
+        return "thinkingConfig.thinkingLevel"
+    return "reasoningEffort"
+
+
+def build_variant_option(
+    protocol: str, model_id: str, level: str, thinking_field: str
+) -> Dict[str, Any]:
+    """将界面中的变体档位转换为协议要求的模型选项。"""
+    if protocol != "gemini_native":
+        return {thinking_field: level}
+
+    return {
+        "thinkingConfig": {"includeThoughts": True, "thinkingLevel": level}
+    }
+
 # ████████████████████████████████████████████████████████████████████████████████
 # ██  JSON 解析工具
 # ████████████████████████████████████████████████████████████████████████████████
 
 def parse_jsonc(content: str) -> Dict:
     """解析 JSONC 内容（支持注释和尾随逗号）"""
-    import re
-    
+
     # 移除多行注释
     content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
     
@@ -268,56 +336,184 @@ def clean_base_url(url: str) -> str:
     url = url.rstrip("/")
     return url
 
-def ensure_v1_in_url(url: str) -> str:
-    """确保 URL 标准化为 /v1 端点
-    
-    处理逻辑：
-    1. 移除末尾斜杠
-    2. 如果以 /v1 结尾，保留
-    3. 如果以 /v1/xxx 结尾，截取到 /v1
-    4. 如果没有 /v1，补全
-    """
-    url = url.rstrip("/")
-    
-    # 检查是否包含 /v1
-    if "/v1" in url:
-        # 找到 /v1 的位置，截取到那里
-        idx = url.index("/v1")
-        url = url[:idx + 3]  # 保留 /v1
-    else:
-        # 没有 /v1，补全
-        url = url + "/v1"
-    
-    return url
+def ensure_protocol_endpoint(url: str, protocol: str) -> str:
+    """按协议补全 API 版本端点，Gemini 原生协议固定使用 /v1beta。"""
+    url = clean_base_url(url.strip())
+    if not url:
+        return url
+
+    if protocol == "gemini_native":
+        # Gemini 原生接口不是 OpenAI Chat Completions；用户粘贴兼容接口地址时，
+        # 统一回退到 Google Generative Language API 的版本根路径。
+        url = re.sub(
+            r"/v1beta(?:/(?:openai/)?chat/completions|/models/[^/]+:(?:generateContent|streamGenerateContent))$",
+            "/v1beta",
+            url,
+            flags=re.IGNORECASE,
+        )
+        url = re.sub(r"/v1beta-chat-completions$", "/v1beta", url, flags=re.IGNORECASE)
+        url = re.sub(r"/v1(?:/(?:openai/)?chat/completions)$", "/v1", url, flags=re.IGNORECASE)
+
+    api_version = PROTOCOLS.get(protocol, PROTOCOLS["openai_standard"])["api_version"]
+    version_path = f"/{api_version}"
+
+    # 用户可能粘贴完整资源端点；统一截断到已有的 v1/v1beta 版本段。
+    version_match = re.search(r"/v1(?:beta)?(?=/|$|\?|#)", url)
+    if version_match:
+        return url[:version_match.start()] + version_path
+    return url + version_path
+
+
+def build_model_list_request(base_url: str, api_key: str, protocol: str) -> Dict[str, Any]:
+    """构造对应协议的模型列表请求参数。"""
+    base = ensure_protocol_endpoint(base_url, protocol)
+    if protocol == "gemini_native":
+        return {
+            "url": f"{base}/models",
+            "headers": {
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+            "params": None,
+        }
+    return {
+        "url": f"{base}/models",
+        "headers": {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        "params": None,
+    }
+
+
+def parse_model_list(data: Dict[str, Any], protocol: str) -> List[Dict[str, Any]]:
+    """解析 OpenAI/xAI 或 Gemini 原生模型列表响应。"""
+    models = []
+    if protocol == "gemini_native":
+        for model in data.get("models", []):
+            model_id = model.get("name", "")
+            if model_id.startswith("models/"):
+                model_id = model_id[len("models/"):]
+            if model_id:
+                models.append({
+                    "id": model_id,
+                    "name": model.get("displayName", model_id),
+                    "owned_by": "google",
+                })
+        return models
+
+    for model in data.get("data", []):
+        model_id = model.get("id", "")
+        if model_id:
+            models.append({
+                "id": model_id,
+                "name": model.get("id", ""),
+                "owned_by": model.get("owned_by", ""),
+            })
+    return models
+
+
+def build_model_test_request(
+    base_url: str,
+    api_key: str,
+    protocol: str,
+    model_id: str,
+    prompt: str,
+    max_tokens: int,
+    stream: bool = False,
+) -> Dict[str, Any]:
+    """构造对应协议的模型连通性或测速请求。"""
+    base = ensure_protocol_endpoint(base_url, protocol)
+    if protocol == "gemini_native":
+        clean_model_id = model_id.removeprefix("models/")
+        action = "streamGenerateContent" if stream else "generateContent"
+        params = {"alt": "sse"} if stream else None
+        return {
+            "url": f"{base}/models/{clean_model_id}:{action}",
+            "headers": {
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+            "params": params,
+            "payload": {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens},
+            },
+        }
+
+    if protocol == "grok_native":
+        return {
+            "url": f"{base}/responses",
+            "headers": {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            "params": None,
+            "payload": {
+                "model": model_id,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": prompt}],
+                    }
+                ],
+                "max_output_tokens": max_tokens,
+                **({"stream": True} if stream else {}),
+            },
+        }
+
+    return {
+        "url": f"{base}/chat/completions",
+        "headers": {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        "params": None,
+        "payload": {
+            "model": model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            **({"stream": True} if stream else {}),
+        },
+    }
+
+
+def extract_stream_text(data: Dict[str, Any], protocol: str) -> str:
+    """从不同协议的流式事件中提取文本。"""
+    if protocol == "gemini_native":
+        candidates = data.get("candidates", [])
+        if not candidates:
+            return ""
+        parts = candidates[0].get("content", {}).get("parts", [])
+        return "".join(part.get("text", "") for part in parts)
+
+    if protocol == "grok_native":
+        if data.get("type") == "response.output_text.delta":
+            return data.get("delta", "")
+        return ""
+
+    choices = data.get("choices", [])
+    if not choices:
+        return ""
+    return choices[0].get("delta", {}).get("content", "")
 
 # ████████████████████████████████████████████████████████████████████████████████
 # ██  模型探测函数
 # ████████████████████████████████████████████████████████████████████████████████
 
-def probe_models(base_url: str, api_key: str) -> List[Dict[str, Any]]:
+def probe_models(base_url: str, api_key: str, protocol: str = "openai_standard") -> List[Dict[str, Any]]:
     """探测可用模型"""
-    base = ensure_v1_in_url(base_url)
-    models_url = f"{base}/models"
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    
+    request_config = build_model_list_request(base_url, api_key, protocol)
+
     try:
-        response = requests.get(models_url, headers=headers, timeout=10)
+        response = requests.get(
+            request_config["url"],
+            headers=request_config["headers"],
+            params=request_config["params"],
+            timeout=10,
+        )
         response.raise_for_status()
-        data = response.json()
-        
-        models = []
-        if "data" in data:
-            for model in data["data"]:
-                models.append({
-                    "id": model.get("id", ""),
-                    "name": model.get("id", ""),
-                    "owned_by": model.get("owned_by", ""),
-                })
-        return models
+        return parse_model_list(response.json(), protocol)
     except Exception as e:
         raise Exception(f"模型探测失败: {str(e)}")
 
@@ -846,7 +1042,7 @@ class ProviderFrame(ctk.CTkFrame):
         self.protocol_var = ctk.StringVar(value="openai_standard")
         self.protocol_menu = ctk.CTkOptionMenu(
             row,
-            values=["openai_standard", "openai_response"],
+            values=list(PROTOCOLS.keys()),
             variable=self.protocol_var,
             width=200,
             font=(FONT_FAMILY, FONT_SIZE_NORMAL)
@@ -926,6 +1122,7 @@ class ProviderFrame(ctk.CTkFrame):
         """选择模型（探测并弹出选择对话框）"""
         url = self.url_entry.get().strip()
         api_key = self.api_key_entry.get().strip()
+        protocol = self.protocol_var.get()
         
         if not url:
             self.app.show_status("请输入 Base URL", "error")
@@ -944,7 +1141,7 @@ class ProviderFrame(ctk.CTkFrame):
         
         def probe_thread():
             try:
-                models = probe_models(url, api_key)
+                models = probe_models(url, api_key, protocol)
                 self.after(0, lambda: self._show_model_selector(models))
             except Exception as e:
                 self.after(0, lambda: self._on_probe_error(str(e)))
@@ -986,14 +1183,9 @@ class ProviderFrame(ctk.CTkFrame):
                                 "input": ["text"],
                                 "output": ["text"]
                             },
-                                "variants": {
-                                    "max": {"reasoningEffort": "max"},
-                                    "xhigh": {"reasoningEffort": "xhigh"},
-                                    "high": {"reasoningEffort": "high"},
-                                    "medium": {"reasoningEffort": "medium"},
-                                    "low": {"reasoningEffort": "low"},
-                                    "none": {"reasoningEffort": "none"}
-                                }
+                            "variants": default_model_variants(
+                                self.protocol_var.get(), model_id
+                            )
                         }
                 self._refresh_model_list()
                 self.app.show_status(f"已添加 {len(dialog.selected_models)} 个模型", "success")
@@ -1005,15 +1197,9 @@ class ProviderFrame(ctk.CTkFrame):
         if name:
             self.current_provider = name
             if name not in self.providers:
-                # 根据协议类型选择 npm 包
                 protocol = self.protocol_var.get()
-                if protocol == "openai_response":
-                    npm_package = "@ai-sdk/openai"
-                else:
-                    npm_package = "@ai-sdk/openai-compatible"
-                
                 self.providers[name] = {
-                    "npm": npm_package,
+                    "npm": npm_for_protocol(protocol),
                     "name": name,
                     "options": {"baseURL": ""},
                     "models": {}
@@ -1021,17 +1207,27 @@ class ProviderFrame(ctk.CTkFrame):
                 self._refresh_provider_list()
     
     def _on_protocol_change(self, *args):
-        """协议变化时更新 npm 字段"""
+        """协议变化时更新 npm 字段和版本端点。"""
         if not self.current_provider or self.current_provider not in self.providers:
             return
-        
+
         protocol = self.protocol_var.get()
-        if protocol == "openai_response":
-            npm_package = "@ai-sdk/openai"
-        else:
-            npm_package = "@ai-sdk/openai-compatible"
-        
-        self.providers[self.current_provider]["npm"] = npm_package
+        previous_protocol = protocol_for_npm(
+            self.providers[self.current_provider].get("npm", "")
+        )
+        self.providers[self.current_provider]["npm"] = npm_for_protocol(protocol)
+
+        if previous_protocol != protocol:
+            for model_id, model_config in self.providers[self.current_provider].get("models", {}).items():
+                model_config["variants"] = default_model_variants(protocol, model_id)
+            self._refresh_model_list()
+
+        current_url = self.url_entry.get().strip()
+        if current_url:
+            normalized_url = ensure_protocol_endpoint(current_url, protocol)
+            self.url_entry.delete(0, "end")
+            self.url_entry.insert(0, normalized_url)
+            self.providers[self.current_provider].setdefault("options", {})["baseURL"] = normalized_url
     
     def _add_provider(self):
         """添加新 Provider（根据编辑框内容命名）"""
@@ -1049,15 +1245,9 @@ class ProviderFrame(ctk.CTkFrame):
                 counter += 1
                 name = f"{base_name}-{counter}"
         
-        # 根据协议类型选择 npm 包
         protocol = self.protocol_var.get()
-        if protocol == "openai_response":
-            npm_package = "@ai-sdk/openai"
-        else:
-            npm_package = "@ai-sdk/openai-compatible"
-        
         self.providers[name] = {
-            "npm": npm_package,
+            "npm": npm_for_protocol(protocol),
             "name": name,
             "options": {"baseURL": ""},
             "models": {}
@@ -1090,12 +1280,8 @@ class ProviderFrame(ctk.CTkFrame):
             self.api_key_entry.delete(0, "end")
             self.api_key_entry.insert(0, options.get("apiKey", ""))
             
-            # 根据 npm 字段设置协议
             npm = provider.get("npm", "@ai-sdk/openai-compatible")
-            if npm == "@ai-sdk/openai":
-                self.protocol_var.set("openai_response")
-            else:
-                self.protocol_var.set("openai_standard")
+            self.protocol_var.set(protocol_for_npm(npm))
             
             self.probe_status_label.configure(text="")
             self._refresh_model_list()
@@ -1228,28 +1414,28 @@ class ProviderFrame(ctk.CTkFrame):
         row3 = ctk.CTkFrame(frame)
         row3.pack(fill="x", padx=5, pady=3)
         
-        # 自动检测思考字段名
-        thinking_field = "reasoningEffort"
-        
-        # 尝试从 options 读取
-        options = model_config.get("options", {})
-        if "reasoningEffort" in options:
-            thinking_field = "reasoningEffort"
-        elif "thinking" in options:
-            thinking_field = "thinking"
-        # 尝试从 variants 读取
-        elif "variants" in model_config:
-            variants = model_config["variants"]
-            for variant in variants.values():
-                if "reasoningEffort" in variant:
-                    thinking_field = "reasoningEffort"
-                    break
-                elif "thinking" in variant:
-                    thinking_field = "thinking"
-                    break
+        protocol = self.protocol_var.get()
+        thinking_field = thinking_field_for_model(protocol, model_id)
+
+        if protocol != "gemini_native":
+            # 非 Gemini 协议继续兼容已有的自定义思考字段。
+            options = model_config.get("options", {})
+            if "reasoningEffort" in options:
+                thinking_field = "reasoningEffort"
+            elif "thinking" in options:
+                thinking_field = "thinking"
+            elif "variants" in model_config:
+                variants = model_config["variants"]
+                for variant in variants.values():
+                    if "reasoningEffort" in variant:
+                        thinking_field = "reasoningEffort"
+                        break
+                    if "thinking" in variant:
+                        thinking_field = "thinking"
+                        break
         
         ctk.CTkLabel(row3, text="思考:", width=50, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left")
-        think_field_entry = ctk.CTkEntry(row3, placeholder_text="reasoningEffort", width=130, font=(FONT_FAMILY, FONT_SIZE_NORMAL), justify="center")
+        think_field_entry = ctk.CTkEntry(row3, placeholder_text=thinking_field, width=190, font=(FONT_FAMILY, FONT_SIZE_NORMAL), justify="center")
         think_field_entry.pack(side="left", padx=3)
         think_field_entry.insert(0, thinking_field)
         
@@ -1351,6 +1537,7 @@ class ProviderFrame(ctk.CTkFrame):
         # 直接从 UI 读取配置
         base_url = self.url_entry.get().strip()
         api_key = self.api_key_entry.get().strip()
+        protocol = self.protocol_var.get()
         
         if not base_url or not api_key:
             self.app.show_status("请先配置 Base URL 和 API Key", "error")
@@ -1360,18 +1547,21 @@ class ProviderFrame(ctk.CTkFrame):
         
         def test_thread():
             try:
-                url = f"{ensure_v1_in_url(base_url)}/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": model_id,
-                    "messages": [{"role": "user", "content": "此信息仅用于测试最快连通性，以最快的方式回答\"hello\"，不要任何思考"}],
-                    "max_tokens": 10
-                }
-                
-                response = requests.post(url, json=payload, headers=headers, timeout=15)
+                request_config = build_model_test_request(
+                    base_url,
+                    api_key,
+                    protocol,
+                    model_id,
+                    "此信息仅用于测试最快连通性，以最快的方式回答\"hello\"，不要任何思考",
+                    10,
+                )
+                response = requests.post(
+                    request_config["url"],
+                    json=request_config["payload"],
+                    headers=request_config["headers"],
+                    params=request_config["params"],
+                    timeout=15,
+                )
                 response.raise_for_status()
                 self.after(0, lambda: btn.configure(text="✓", state="normal", fg_color="green"))
             except Exception as e:
@@ -1385,6 +1575,7 @@ class ProviderFrame(ctk.CTkFrame):
         # 直接从 UI 读取配置
         base_url = self.url_entry.get().strip()
         api_key = self.api_key_entry.get().strip()
+        protocol = self.protocol_var.get()
         
         if not base_url or not api_key:
             self.app.show_status("请先配置 Base URL 和 API Key", "error")
@@ -1394,23 +1585,28 @@ class ProviderFrame(ctk.CTkFrame):
         
         def speed_thread():
             try:
-                url = f"{ensure_v1_in_url(base_url)}/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": model_id,
-                    "messages": [{"role": "user", "content": "此信息仅用于测试最快输出速度，不要任何思考，以最快的方式回答1000个\"hello\"，以空格分割"}],
-                    "max_tokens": 2000,
-                    "stream": True
-                }
+                request_config = build_model_test_request(
+                    base_url,
+                    api_key,
+                    protocol,
+                    model_id,
+                    "此信息仅用于测试最快输出速度，不要任何思考，以最快的方式回答1000个\"hello\"，以空格分割",
+                    2000,
+                    stream=True,
+                )
                 
                 start_time = None
                 token_count = 0
                 first_token_received = False
                 
-                response = requests.post(url, json=payload, headers=headers, timeout=15, stream=True)
+                response = requests.post(
+                    request_config["url"],
+                    json=request_config["payload"],
+                    headers=request_config["headers"],
+                    params=request_config["params"],
+                    timeout=15,
+                    stream=True,
+                )
                 response.raise_for_status()
                 
                 for line in response.iter_lines():
@@ -1419,25 +1615,21 @@ class ProviderFrame(ctk.CTkFrame):
                         if line_str.startswith('data: ') and line_str != 'data: [DONE]':
                             try:
                                 data = json.loads(line_str[6:])
-                                if 'choices' in data and len(data['choices']) > 0:
-                                    delta = data['choices'][0].get('delta', {})
-                                    content = delta.get('content', '')
-                                    if content:
-                                        if not first_token_received:
-                                            first_token_received = True
-                                            start_time = time.time()
-                                            self.after(0, lambda: btn.configure(text="测速中"))
-                                        
-                                        # 计算hello数量
-                                        hello_count = content.lower().count('hello')
-                                        token_count += hello_count
-                                        
-                                        # 检查是否超过5秒
-                                        if start_time and time.time() - start_time >= 5:
-                                            elapsed = time.time() - start_time
-                                            speed = token_count / elapsed
-                                            self.after(0, lambda: btn.configure(text=f"{speed:.1f}t/s", state="normal"))
-                                            return
+                                content = extract_stream_text(data, protocol)
+                                if content:
+                                    if not first_token_received:
+                                        first_token_received = True
+                                        start_time = time.time()
+                                        self.after(0, lambda: btn.configure(text="测速中"))
+
+                                    # 计算 hello 数量，保持现有测速口径。
+                                    token_count += content.lower().count('hello')
+
+                                    if start_time and time.time() - start_time >= 5:
+                                        elapsed = time.time() - start_time
+                                        speed = token_count / elapsed
+                                        self.after(0, lambda: btn.configure(text=f"{speed:.1f}t/s", state="normal"))
+                                        return
                             except json.JSONDecodeError:
                                 continue
                 
@@ -1493,7 +1685,10 @@ class ProviderFrame(ctk.CTkFrame):
         existing_levels = [l for _, l in variant_widgets]
         
         # 可选的强度
-        all_levels = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        if self.protocol_var.get() == "gemini_native":
+            all_levels = ["low", "medium", "high"]
+        else:
+            all_levels = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
         available_levels = [l for l in all_levels if l not in existing_levels]
         
         if not available_levels:
@@ -1576,14 +1771,9 @@ class ProviderFrame(ctk.CTkFrame):
                     "input": ["text"],
                     "output": ["text"]
                 },
-                "variants": {
-                    "max": {"reasoningEffort": "max"},
-                    "xhigh": {"reasoningEffort": "xhigh"},
-                    "high": {"reasoningEffort": "high"},
-                    "medium": {"reasoningEffort": "medium"},
-                    "low": {"reasoningEffort": "low"},
-                    "none": {"reasoningEffort": "none"}
-                }
+                "variants": default_model_variants(
+                    self.protocol_var.get(), model_id
+                )
             }
             self._refresh_model_list()
             self.app.schedule_auto_save()
@@ -1598,7 +1788,9 @@ class ProviderFrame(ctk.CTkFrame):
         
         if not new_name:
             return
-        
+
+        protocol = self.protocol_var.get()
+
         # 收集模型配置
         models = {}
         for entry in self.model_entries:
@@ -1647,7 +1839,9 @@ class ProviderFrame(ctk.CTkFrame):
                 if not entry.get("variants_disabled", False) and thinking_field and variant_levels:
                     variants = {}
                     for level in variant_levels:
-                        variants[level] = {thinking_field: level}
+                        variants[level] = build_variant_option(
+                            protocol, model_id, level, thinking_field
+                        )
                     model_cfg["variants"] = variants
                 
                 models[model_id] = model_cfg
@@ -1655,12 +1849,7 @@ class ProviderFrame(ctk.CTkFrame):
         # 获取现有的 provider 配置（保留其他字段）
         existing_provider = self.providers.get(old_name, {}).copy()
         
-        # 根据协议类型更新 npm 字段
-        protocol = self.protocol_var.get()
-        if protocol == "openai_response":
-            existing_provider["npm"] = "@ai-sdk/openai"
-        else:
-            existing_provider["npm"] = "@ai-sdk/openai-compatible"
+        existing_provider["npm"] = npm_for_protocol(protocol)
         
         # 更新 provider 配置
         existing_provider["name"] = new_name
@@ -2458,7 +2647,10 @@ class App(ctk.CTk):
                     
                     # 更新 options（只更新 baseURL，保留其他 options）
                     existing_options = existing_provider.get("options", {})
-                    existing_options["baseURL"] = ensure_v1_in_url(provider["options"]["baseURL"])
+                    protocol = protocol_for_npm(provider.get("npm", ""))
+                    existing_options["baseURL"] = ensure_protocol_endpoint(
+                        provider["options"]["baseURL"], protocol
+                    )
                     existing_provider["options"] = existing_options
                     
                     # 更新 models
