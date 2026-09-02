@@ -11,7 +11,7 @@
 ### 1. 安装依赖
 
 ```bash
-pip install customtkinter requests platformdirs
+pip install "flet==0.28.3" requests platformdirs
 ```
 
 ### 2. 运行应用

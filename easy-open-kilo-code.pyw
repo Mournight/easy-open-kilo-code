@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OpenCode 配置编辑器
-跨平台、高分屏适配的配置管理工具
+Easy-Open-Kilo-Code: OpenCode & KiloCode 跨平台图形化配置编辑器
+基于 Flet 0.28.3 重构，单文件、高分屏适配、现代 Material 3 界面。
 """
 
 import json
@@ -12,49 +12,60 @@ import platform
 import re
 import threading
 import time
-import requests
+import subprocess
+import hashlib
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Callable
 
-import customtkinter as ctk
-from tkinter import messagebox, filedialog
+import requests
 import platformdirs
+import flet as ft
+
 
 # ████████████████████████████████████████████████████████████████████████████████
-# ██  常量定义
+# ██  SECTION 1: 常量定义、协议映射与跨平台字体配置
 # ████████████████████████████████████████████████████████████████████████████████
 
-# 常量定义
-APP_NAME = "OpenCode 配置编辑器"
-APP_VERSION = "1.0.0"
-WINDOW_SIZE = "1600x900"
+APP_NAME = "Easy OpenCode & KiloCode 配置编辑器"
+APP_VERSION = "2.0.0"
+WINDOW_WIDTH = 1450
+WINDOW_HEIGHT = 880
 
-# 字体配置
-FONT_FAMILY = "宋体"
-FONT_SIZE_NORMAL = 14
-FONT_SIZE_LARGE = 16
-FONT_SIZE_TITLE = 20
-FONT_SIZE_SMALL = 12
 
-# 按钮专用加粗字体
-BTN_FONT = (FONT_FAMILY, FONT_SIZE_NORMAL, "bold")
-BTN_FONT_SMALL = (FONT_FAMILY, FONT_SIZE_SMALL, "bold")
+def get_system_font_family() -> str:
+    """获取兼容 Ubuntu Desktop、Windows 以及 macOS 的最推荐字体。
+    - Windows: 优先使用 'Microsoft YaHei' (微软雅黑)、'Segoe UI'
+    - Ubuntu/Linux Desktop: 优先使用 'Noto Sans CJK SC' (思源黑体)、'Ubuntu'、'WenQuanYi Micro Hei'
+    - macOS: 优先使用 'PingFang SC'
+    """
+    if sys.platform == "win32":
+        return "Microsoft YaHei, Segoe UI, sans-serif"
+    elif sys.platform.startswith("linux"):
+        return "Noto Sans CJK SC, Ubuntu, WenQuanYi Micro Hei, DejaVu Sans, sans-serif"
+    elif sys.platform == "darwin":
+        return "PingFang SC, Helvetica Neue, sans-serif"
+    return "sans-serif"
 
-# Provider 协议统一定义，避免 UI、保存和请求逻辑各自维护映射。
+
+# Provider 协议统一定义
 PROTOCOLS = {
     "openai_standard": {
+        "name": "OpenAI Compatible",
         "npm": "@ai-sdk/openai-compatible",
         "api_version": "v1",
     },
     "openai_response": {
+        "name": "OpenAI Responses",
         "npm": "@ai-sdk/openai",
         "api_version": "v1",
     },
     "gemini_native": {
+        "name": "Gemini Native",
         "npm": "@ai-sdk/google",
         "api_version": "v1beta",
     },
     "grok_native": {
+        "name": "Grok Native",
         "npm": "@ai-sdk/xai",
         "api_version": "v1",
     },
@@ -62,20 +73,20 @@ PROTOCOLS = {
 
 
 def npm_for_protocol(protocol: str) -> str:
-    """返回协议对应的 OpenCode AI SDK 包。"""
+    """返回协议对应的 OpenCode AI SDK npm 包。"""
     return PROTOCOLS.get(protocol, PROTOCOLS["openai_standard"])["npm"]
 
 
 def protocol_for_npm(npm_package: str) -> str:
-    """根据 OpenCode Provider 的 npm 包反推界面协议。"""
+    """根据 OpenCode Provider 的 npm 包反推协议名称。"""
     for protocol, config in PROTOCOLS.items():
         if config["npm"] == npm_package:
             return protocol
     return "openai_standard"
 
 
-def default_model_variants(protocol: str, model_id: str) -> Dict[str, Dict[str, Any]]:
-    """生成与 OpenCode Provider 转换逻辑一致的默认思考变体。"""
+def default_model_variants(protocol: str, model_id: str = "") -> Dict[str, Dict[str, Any]]:
+    """生成与协议一致的默认思考/推理变体配置。"""
     if protocol == "gemini_native":
         return {
             level: {
@@ -90,8 +101,8 @@ def default_model_variants(protocol: str, model_id: str) -> Dict[str, Dict[str, 
     }
 
 
-def thinking_field_for_model(protocol: str, model_id: str) -> str:
-    """返回界面展示的协议原生思考控制字段。"""
+def thinking_field_for_model(protocol: str, model_id: str = "") -> str:
+    """返回协议原生思考控制字段名。"""
     if protocol == "gemini_native":
         return "thinkingConfig.thinkingLevel"
     return "reasoningEffort"
@@ -100,33 +111,42 @@ def thinking_field_for_model(protocol: str, model_id: str) -> str:
 def build_variant_option(
     protocol: str, model_id: str, level: str, thinking_field: str
 ) -> Dict[str, Any]:
-    """将界面中的变体档位转换为协议要求的模型选项。"""
-    if protocol != "gemini_native":
-        return {thinking_field: level}
+    """将界面中的变体档位转换为协议要求的模型选项结构。"""
+    if protocol == "gemini_native":
+        return {
+            "thinkingConfig": {"includeThoughts": True, "thinkingLevel": level}
+        }
+    return {thinking_field: level}
 
-    return {
-        "thinkingConfig": {"includeThoughts": True, "thinkingLevel": level}
-    }
+
+def safe_update(control: Optional[ft.Control], page: Optional[ft.Page] = None):
+    """安全更新控件，确保控件已挂载到页面后再调用 update。"""
+    try:
+        if control is not None and getattr(control, "page", None) is not None:
+            control.update()
+        elif page is not None and hasattr(page, "update"):
+            page.update()
+    except Exception:
+        pass
+
+
 
 # ████████████████████████████████████████████████████████████████████████████████
-# ██  JSON 解析工具
+# ██  SECTION 2: 纯算法层 - JSONC 解析与 MCP 配置格式规范化
 # ████████████████████████████████████████████████████████████████████████████████
 
 def parse_jsonc(content: str) -> Dict:
-    """解析 JSONC 内容（支持注释和尾随逗号）"""
-
-    # 移除多行注释
+    """解析 JSONC 内容（支持多行注释、单行注释以及尾随逗号容错）。"""
+    # 移除多行注释 /* ... */
     content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-    
-    # 移除单行注释
+
+    # 移除单行注释 // ...
     lines = content.split('\n')
     cleaned_lines = []
     for line in lines:
-        # 跳过纯注释行
         stripped = line.strip()
         if stripped.startswith('//'):
             continue
-        # 移除行内注释
         if '//' in line:
             in_string = False
             escape_next = False
@@ -143,24 +163,23 @@ def parse_jsonc(content: str) -> Dict:
                     line = line[:i]
                     break
         cleaned_lines.append(line)
-    
+
     cleaned_content = '\n'.join(cleaned_lines)
-    
     # 移除尾随逗号
     cleaned_content = re.sub(r',\s*([}\]])', r'\1', cleaned_content)
-    
     return json.loads(cleaned_content)
 
+
 def normalize_mcp_config(config: Dict) -> Dict:
-    """规范化 MCP 配置，兼容多种 IDE 格式（Cursor/Windsurf/OpenCode/KiloCode）"""
+    """规范化 MCP 配置，兼容多种 IDE 格式（Cursor/Windsurf/OpenCode/KiloCode）。"""
     normalized = {}
-    
+
     for name, server in config.items():
         if not isinstance(server, dict):
             continue
-        
-        entry = dict(server)  # 浅拷贝，避免修改原数据
-        
+
+        entry = dict(server)
+
         # 1. 自动推断 type
         if "type" not in entry:
             if "command" in entry:
@@ -168,123 +187,65 @@ def normalize_mcp_config(config: Dict) -> Dict:
             elif "url" in entry:
                 entry["type"] = "remote"
             else:
-                continue  # 无法识别，跳过
-        
+                continue
+
         # 2. 规范化 local 类型的 command 字段
         if entry["type"] == "local":
             command = entry.get("command")
             args = entry.get("args", [])
-            
+
             # Cursor/Windsurf 格式：command 是字符串，args 是数组
             if isinstance(command, str):
                 entry["command"] = [command] + (args if isinstance(args, list) else [])
                 if "args" in entry:
                     del entry["args"]
-            
-            # 确保 command 是列表
+
             if not isinstance(entry.get("command"), list):
-                continue  # 无效配置，跳过
-            
-            # 统一 environment -> env（OpenCode 用 environment，KiloCode 用 env）
-            # 两者都支持，不做转换
-        
-        # 3. 补全 enabled 字段（默认 true）
+                continue
+
+        # 3. 补全 enabled 字段（默认 True）
         if "enabled" not in entry:
             entry["enabled"] = True
-        
+
         normalized[name] = entry
-    
+
     return normalized
 
+
+
 # ████████████████████████████████████████████████████████████████████████████████
-# ██  配置路径工具函数
+# ██  SECTION 3: 纯算法层 - 跨平台路径与凭据管理
 # ████████████████████████████████████████████████████████████████████████████████
 
-# 程序配置目录（使用 platformdirs 确保跨平台兼容）
 APP_CONFIG_DIR = Path(platformdirs.user_config_dir("easy-open-kilo-code"))
 APP_CONFIG_FILE = APP_CONFIG_DIR / "app-settings.json"
 
+
 def load_app_settings() -> Dict:
-    """加载程序设置"""
+    """加载程序自身的用户偏好设置。"""
     if APP_CONFIG_FILE.exists():
         try:
             with open(APP_CONFIG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except Exception:
             pass
     return {}
 
+
 def save_app_settings(settings: Dict):
-    """保存程序设置"""
+    """持久化保存程序自身的用户偏好设置。"""
     APP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(APP_CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
 
-# OpenCode 配置路径
-def get_opencode_config_dir() -> Path:
-    """获取 OpenCode 全局配置目录"""
-    # 所有系统都使用 ~/.config/opencode
-    return Path.home() / ".config" / "opencode"
-
-def get_opencode_config_path() -> Path:
-    """获取 OpenCode 全局配置文件路径（支持 .json 和 .jsonc）"""
-    config_dir = get_opencode_config_dir()
-    
-    # 优先查找 opencode.jsonc，然后 opencode.json
-    jsonc_path = config_dir / "opencode.jsonc"
-    json_path = config_dir / "opencode.json"
-    
-    if jsonc_path.exists():
-        return jsonc_path
-    elif json_path.exists():
-        return json_path
-    else:
-        # 默认使用 .jsonc
-        return jsonc_path
-
-def get_agents_md_path() -> Path:
-    """获取全局 AGENTS.md 路径"""
-    return get_opencode_config_dir() / "AGENTS.md"
-
-def _brand_auth_json_path(brand: str) -> Path:
-    """获取指定品牌的 auth.json 路径"""
-    if brand == "KiloCode":
-        # KiloCode 实际使用 XDG_DATA_HOME 路径（非 XDG_CONFIG_HOME）
-        return Path.home() / ".local" / "share" / "kilo" / "auth.json"
-    # OpenCode
-    auth_path = os.environ.get("OPENCODE_AUTH_PATH")
-    if auth_path:
-        return Path(auth_path)
-    return Path.home() / ".local" / "share" / "opencode" / "auth.json"
-
-def get_auth_json_path() -> Path:
-    """获取 auth.json 路径（默认 OpenCode）"""
-    return _brand_auth_json_path("OpenCode")
-
-def load_auth_json(brand: str = "OpenCode") -> Dict:
-    """加载 auth.json"""
-    auth_path = _brand_auth_json_path(brand)
-    if auth_path.exists():
-        try:
-            with open(auth_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            pass
-    return {}
-
-def save_auth_json(auth_data: Dict, brand: str = "OpenCode"):
-    """保存 auth.json"""
-    auth_path = _brand_auth_json_path(brand)
-    auth_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(auth_path, "w", encoding="utf-8") as f:
-        json.dump(auth_data, f, indent=2, ensure_ascii=False)
 
 def _brand_config_dir(brand: str) -> Path:
-    """获取指定品牌的全局配置目录"""
+    """获取指定品牌的全局配置目录。"""
     return Path.home() / ".config" / ("opencode" if brand == "OpenCode" else "kilo")
 
+
 def _brand_config_path(brand: str) -> Path:
-    """获取指定品牌的全局配置文件路径（优先 .jsonc）"""
+    """获取指定品牌的全局配置文件路径（优先查找 .jsonc，其次 .json）。"""
     config_dir = _brand_config_dir(brand)
     if brand == "OpenCode":
         jsonc_path = config_dir / "opencode.jsonc"
@@ -299,52 +260,91 @@ def _brand_config_path(brand: str) -> Path:
         return json_path
     return jsonc_path
 
+
+def _brand_auth_json_path(brand: str) -> Path:
+    """获取指定品牌的 auth.json 密钥库路径。"""
+    if brand == "KiloCode":
+        return Path.home() / ".local" / "share" / "kilo" / "auth.json"
+    auth_path = os.environ.get("OPENCODE_AUTH_PATH")
+    if auth_path:
+        return Path(auth_path)
+    return Path.home() / ".local" / "share" / "opencode" / "auth.json"
+
+
 def _brand_agents_md_path(brand: str) -> Path:
-    """获取指定品牌的全局 AGENTS.md 路径"""
+    """获取指定品牌的全局 AGENTS.md 路径。"""
     return _brand_config_dir(brand) / "AGENTS.md"
 
+
 def _default_schema_url(brand: str) -> str:
-    """返回品牌对应的默认 $schema"""
+    """返回品牌对应的默认 $schema 地址。"""
     return "https://opencode.ai/config.json" if brand == "OpenCode" else "https://app.kilo.ai/config.json"
 
+
 def _to_k_display(value: int) -> str:
-    """将数值转换为 K 单位显示，保持 1000 的整数倍尽量用整数"""
+    """将数值转换为 K 单位显示。"""
     if value >= 1000 and value % 1000 == 0:
         return str(value // 1000)
     return str(value)
 
+
 def _parse_k_display(text: str, default_k_value: int) -> int:
-    """解析 K 单位显示文本，返回原始数值。
-    - 支持 20 / 20K / 20000 等输入
-    - default_k_value 是当输入为空时默认的 K 值
+    """解析 K 单位显示文本并返回真实整数值。
+    - 智能识别：支持 128、128K、4096、64000 等格式
     """
-    raw = text.strip().upper().replace("K", "")
+    raw = str(text).strip().upper()
     if not raw:
         return default_k_value * 1000
+    if raw.endswith("K"):
+        try:
+            return int(float(raw[:-1]) * 1000)
+        except ValueError:
+            return default_k_value * 1000
     try:
-        number = int(raw)
+        num = int(raw)
+        # 如果 <= 1000，认为是 K 单位简写 (例如 128 -> 128000)；若 > 1000 则保留为确切值 (例如 4096)
+        return num * 1000 if num <= 1000 else num
     except ValueError:
         return default_k_value * 1000
-    return number * 1000 if number <= 100000 else number
+
+
+def load_auth_json(brand: str = "OpenCode") -> Dict:
+    """加载指定品牌的 auth.json 密钥数据。"""
+    auth_path = _brand_auth_json_path(brand)
+    if auth_path.exists():
+        try:
+            with open(auth_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_auth_json(auth_data: Dict, brand: str = "OpenCode"):
+    """安全保存指定品牌的 auth.json 密钥数据。"""
+    auth_path = _brand_auth_json_path(brand)
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(auth_path, "w", encoding="utf-8") as f:
+        json.dump(auth_data, f, indent=2, ensure_ascii=False)
+
+
 
 # ████████████████████████████████████████████████████████████████████████████████
-# ██  URL 处理工具函数
+# ██  SECTION 4: 纯算法层 - 网络通信与模型探测/流式测速引擎
 # ████████████████████████████████████████████████████████████████████████████████
 
 def clean_base_url(url: str) -> str:
-    """清洗 base URL，移除多余的斜杠"""
-    url = url.rstrip("/")
-    return url
+    """清洗 Base URL，去除尾随斜杠。"""
+    return url.rstrip("/")
+
 
 def ensure_protocol_endpoint(url: str, protocol: str) -> str:
-    """按协议补全 API 版本端点，Gemini 原生协议固定使用 /v1beta。"""
+    """按协议规范自动补全 API 版本端点。"""
     url = clean_base_url(url.strip())
     if not url:
         return url
 
     if protocol == "gemini_native":
-        # Gemini 原生接口不是 OpenAI Chat Completions；用户粘贴兼容接口地址时，
-        # 统一回退到 Google Generative Language API 的版本根路径。
         url = re.sub(
             r"/v1beta(?:/(?:openai/)?chat/completions|/models/[^/]+:(?:generateContent|streamGenerateContent))$",
             "/v1beta",
@@ -357,7 +357,6 @@ def ensure_protocol_endpoint(url: str, protocol: str) -> str:
     api_version = PROTOCOLS.get(protocol, PROTOCOLS["openai_standard"])["api_version"]
     version_path = f"/{api_version}"
 
-    # 用户可能粘贴完整资源端点；统一截断到已有的 v1/v1beta 版本段。
     version_match = re.search(r"/v1(?:beta)?(?=/|$|\?|#)", url)
     if version_match:
         return url[:version_match.start()] + version_path
@@ -365,7 +364,7 @@ def ensure_protocol_endpoint(url: str, protocol: str) -> str:
 
 
 def build_model_list_request(base_url: str, api_key: str, protocol: str) -> Dict[str, Any]:
-    """构造对应协议的模型列表请求参数。"""
+    """构造探测模型列表的 HTTP 请求参数。"""
     base = ensure_protocol_endpoint(base_url, protocol)
     if protocol == "gemini_native":
         return {
@@ -387,7 +386,7 @@ def build_model_list_request(base_url: str, api_key: str, protocol: str) -> Dict
 
 
 def parse_model_list(data: Dict[str, Any], protocol: str) -> List[Dict[str, Any]]:
-    """解析 OpenAI/xAI 或 Gemini 原生模型列表响应。"""
+    """解析不同协议的模型列表响应。"""
     models = []
     if protocol == "gemini_native":
         for model in data.get("models", []):
@@ -413,6 +412,19 @@ def parse_model_list(data: Dict[str, Any], protocol: str) -> List[Dict[str, Any]
     return models
 
 
+def probe_models(base_url: str, api_key: str, protocol: str = "openai_standard") -> List[Dict[str, Any]]:
+    """向服务端发送 HTTP 请求探测可用模型列表。"""
+    request_config = build_model_list_request(base_url, api_key, protocol)
+    response = requests.get(
+        request_config["url"],
+        headers=request_config["headers"],
+        params=request_config["params"],
+        timeout=12,
+    )
+    response.raise_for_status()
+    return parse_model_list(response.json(), protocol)
+
+
 def build_model_test_request(
     base_url: str,
     api_key: str,
@@ -422,7 +434,7 @@ def build_model_test_request(
     max_tokens: int,
     stream: bool = False,
 ) -> Dict[str, Any]:
-    """构造对应协议的模型连通性或测速请求。"""
+    """构造连通性探测或流式测速的 HTTP 请求参数。"""
     base = ensure_protocol_endpoint(base_url, protocol)
     if protocol == "gemini_native":
         clean_model_id = model_id.removeprefix("models/")
@@ -479,7 +491,7 @@ def build_model_test_request(
 
 
 def extract_stream_text(data: Dict[str, Any], protocol: str) -> str:
-    """从不同协议的流式事件中提取文本。"""
+    """从不同协议的 SSE 流式事件 JSON 中提取生成文本。"""
     if protocol == "gemini_native":
         candidates = data.get("candidates", [])
         if not candidates:
@@ -497,2525 +509,1911 @@ def extract_stream_text(data: Dict[str, Any], protocol: str) -> str:
         return ""
     return choices[0].get("delta", {}).get("content", "")
 
-# ████████████████████████████████████████████████████████████████████████████████
-# ██  模型探测函数
-# ████████████████████████████████████████████████████████████████████████████████
-
-def probe_models(base_url: str, api_key: str, protocol: str = "openai_standard") -> List[Dict[str, Any]]:
-    """探测可用模型"""
-    request_config = build_model_list_request(base_url, api_key, protocol)
-
-    try:
-        response = requests.get(
-            request_config["url"],
-            headers=request_config["headers"],
-            params=request_config["params"],
-            timeout=10,
-        )
-        response.raise_for_status()
-        return parse_model_list(response.json(), protocol)
-    except Exception as e:
-        raise Exception(f"模型探测失败: {str(e)}")
 
 
 # ████████████████████████████████████████████████████████████████████████████████
-# ██  模型选择对话框
+# ██  SECTION 5: 核心业务逻辑与配置无损合并管理器 (ConfigManager)
 # ████████████████████████████████████████████████████████████████████████████████
 
-class ModelSelectorDialog(ctk.CTkToplevel):
-    """模型选择对话框"""
-    
-    def __init__(self, parent, models: List[Dict], existing_ids: set):
-        super().__init__(parent)
-        self.title("选择模型")
-        self.geometry("500x600")
-        self.transient(parent)
-        self.grab_set()
-        
-        self.models = models
-        self.existing_ids = existing_ids
-        self.selected_models = []
-        self.checkbox_widgets = []  # (checkbox_widget, var, model_id)
-        self.last_clicked_index = -1
-        self.shift_pressed = False
-        
-        # 绑定 Shift 键检测
-        self.bind("<KeyPress-Shift_L>", lambda e: self._set_shift(True))
-        self.bind("<KeyRelease-Shift_L>", lambda e: self._set_shift(False))
-        self.bind("<KeyPress-Shift_R>", lambda e: self._set_shift(True))
-        self.bind("<KeyRelease-Shift_R>", lambda e: self._set_shift(False))
-        
-        # 居中显示 - 等待窗口完全初始化
-        self.update_idletasks()
-        parent_x = parent.winfo_rootx()
-        parent_y = parent.winfo_rooty()
-        parent_w = parent.winfo_width()
-        parent_h = parent.winfo_height()
-        x = parent_x + (parent_w - 500) // 2
-        y = parent_y + (parent_h - 600) // 2
-        self.geometry(f"+{x}+{y}")
-        
-        self._create_widgets()
-    
-    def _set_shift(self, pressed: bool):
-        """设置 Shift 键状态"""
-        self.shift_pressed = pressed
-    
-    def _create_widgets(self):
-        """创建界面组件"""
-        # 标题栏
-        title_frame = ctk.CTkFrame(self)
-        title_frame.pack(fill="x", padx=10, pady=5)
-        
-        ctk.CTkLabel(
-            title_frame, text=f"发现 {len(self.models)} 个模型",
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        ).pack(side="left", padx=10)
-        
-        # 全选/取消按钮
-        btn_frame = ctk.CTkFrame(title_frame)
-        btn_frame.pack(side="right", padx=5)
-        
-        ctk.CTkButton(
-            btn_frame, text="全选", command=self._select_all, width=60,
-            font=BTN_FONT_SMALL
-        ).pack(side="left", padx=2)
-        
-        ctk.CTkButton(
-            btn_frame, text="取消全选", command=self._deselect_all, width=80,
-            font=BTN_FONT_SMALL
-        ).pack(side="left", padx=2)
-        
-        # 搜索过滤框
-        filter_frame = ctk.CTkFrame(self)
-        filter_frame.pack(fill="x", padx=10, pady=5)
-        
-        ctk.CTkLabel(
-            filter_frame, text="过滤:", font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        ).pack(side="left", padx=5)
-        
-        self.filter_entry = ctk.CTkEntry(
-            filter_frame, placeholder_text="输入关键字过滤模型...",
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        )
-        self.filter_entry.pack(side="left", fill="x", expand=True, padx=5)
-        self.filter_entry.bind("<KeyRelease>", self._on_filter_change)
-        
-        # 模型列表
-        self.list_frame = ctk.CTkScrollableFrame(self)
-        self.list_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        self._build_model_list("")
-        
-        # 底部按钮
-        bottom_frame = ctk.CTkFrame(self)
-        bottom_frame.pack(fill="x", padx=10, pady=10)
-        
-        ctk.CTkLabel(
-            bottom_frame, text="提示: 点击选择，按住 Shift 批量选择",
-            font=(FONT_FAMILY, FONT_SIZE_SMALL), text_color="gray"
-        ).pack(side="left", padx=10)
-        
-        ctk.CTkButton(
-            bottom_frame, text="取消", command=self._cancel, width=80,
-            font=BTN_FONT
-        ).pack(side="right", padx=5)
-        
-        ctk.CTkButton(
-            bottom_frame, text="确定", command=self._confirm, width=80,
-            font=BTN_FONT,
-            fg_color="green", hover_color="darkgreen"
-        ).pack(side="right", padx=5)
-    
-    def _build_model_list(self, filter_text: str):
-        """构建模型列表（支持过滤）"""
-        # 清空现有
-        for widget in self.list_frame.winfo_children():
-            widget.destroy()
-        self.checkbox_widgets.clear()
-        
-        filter_lower = filter_text.lower()
-        
-        for i, model in enumerate(self.models):
-            model_id = model["id"]
-            
-            # 过滤 - 在所有字段中搜索
-            if filter_lower:
-                # 构建搜索文本（包含所有字段）
-                searchable = f"{model_id} {model.get('owned_by', '')}".lower()
-                if filter_lower not in searchable:
-                    continue
-            
-            is_existing = model_id in self.existing_ids
-            
-            var = ctk.BooleanVar(value=False)
-            
-            text = model_id
-            if model.get("owned_by"):
-                text += f"  ({model['owned_by']})"
-            if is_existing:
-                text += "  [已存在]"
-            
-            cb = ctk.CTkCheckBox(
-                self.list_frame,
-                text=text,
-                variable=var,
-                font=(FONT_FAMILY, FONT_SIZE_NORMAL),
-                state="disabled" if is_existing else "normal",
-                command=lambda idx=i: self._on_checkbox_click(idx)
-            )
-            cb.pack(anchor="w", pady=3, padx=5)
-            
-            if not is_existing:
-                self.checkbox_widgets.append((cb, var, model_id, i))
-    
-    def _on_filter_change(self, event=None):
-        """过滤框内容变化"""
-        filter_text = self.filter_entry.get().strip()
-        self._build_model_list(filter_text)
-    
-    def _on_checkbox_click(self, clicked_index: int):
-        """复选框点击处理（支持 Shift 多选）"""
-        if self.shift_pressed and self.last_clicked_index >= 0:
-            # Shift 批量选择
-            start = min(self.last_clicked_index, clicked_index)
-            end = max(self.last_clicked_index, clicked_index)
-            
-            for cb, var, model_id, idx in self.checkbox_widgets:
-                if start <= idx <= end:
-                    var.set(True)
-        
-        self.last_clicked_index = clicked_index
-    
-    def _select_all(self):
-        """全选"""
-        for _, var, _, _ in self.checkbox_widgets:
-            var.set(True)
-    
-    def _deselect_all(self):
-        """取消全选"""
-        for _, var, _, _ in self.checkbox_widgets:
-            var.set(False)
-    
-    def _confirm(self):
-        """确认选择"""
-        self.selected_models = [model_id for _, var, model_id, _ in self.checkbox_widgets if var.get()]
-        self.destroy()
-    
-    def _cancel(self):
-        """取消"""
-        self.selected_models = []
-        self.destroy()
+class ConfigManager:
+    """核心配置管理器：纯逻辑实现配置的读写、提取、无损精准合并与多品牌同步。"""
 
+    def __init__(self, brand: str = "OpenCode"):
+        self.brand = brand
 
-# ████████████████████████████████████████████████████████████████████████████████
-# ██  JSON 导入对话框
-# ████████████████████████████████████████████████████████████████████████████████
+    @property
+    def config_path(self) -> Path:
+        return _brand_config_path(self.brand)
 
-class JsonImportDialog(ctk.CTkToplevel):
-    """JSON 导入对话框"""
-    
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("导入 MCP 配置")
-        self.geometry("600x500")
-        self.transient(parent)
-        self.grab_set()
-        
-        self.result = None
-        
-        # 居中显示
-        self.update_idletasks()
-        x = parent.winfo_rootx() + (parent.winfo_width() - 600) // 2
-        y = parent.winfo_rooty() + (parent.winfo_height() - 500) // 2
-        self.geometry(f"+{x}+{y}")
-        
-        self._create_widgets()
-    
-    def _create_widgets(self):
-        """创建界面组件"""
-        # 说明标签
-        ctk.CTkLabel(
-            self, 
-            text="请粘贴 OpenCode / KiloCode 标准 MCP JSON 配置（支持 mcpServers/mcp 包装）",
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        ).pack(padx=20, pady=(15, 5))
-        
-        # 文本框
-        self.textbox = ctk.CTkTextbox(self, font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        self.textbox.pack(fill="both", expand=True, padx=20, pady=10)
-        
-        # 示例
-        example = '''{
-  "mcp": {
-    "context7": {
-      "type": "remote",
-      "url": "https://mcp.context7.com/mcp",
-      "enabled": true
-    },
-    "exa": {
-      "type": "remote",
-      "url": "https://mcp.exa.ai/mcp",
-      "enabled": true
-    }
-  }
-}'''
-        self.textbox.insert("1.0", example)
-        
-        # 按钮
-        btn_frame = ctk.CTkFrame(self)
-        btn_frame.pack(fill="x", padx=20, pady=15)
-        
-        ctk.CTkButton(
-            btn_frame, text="取消", command=self._cancel, width=80,
-            font=BTN_FONT
-        ).pack(side="right", padx=5)
-        
-        ctk.CTkButton(
-            btn_frame, text="导入", command=self._confirm, width=80,
-            font=BTN_FONT,
-            fg_color="green", hover_color="darkgreen"
-        ).pack(side="right", padx=5)
-    
-    def _confirm(self):
-        """确认导入"""
-        json_str = self.textbox.get("1.0", "end-1c").strip()
-        
-        if not json_str:
-            messagebox.showerror("错误", "请输入 JSON 配置")
-            return
-        
-        try:
-            # 尝试自动补齐最外层大括号
-            # 检查是否缺少最外层 {}
-            if not json_str.startswith('{'):
-                json_str = '{' + json_str + '}'
-            
-            data = json.loads(json_str)
-            self.result = data
-            self.destroy()
-        except json.JSONDecodeError as e:
-            messagebox.showerror("错误", f"JSON 解析失败: {str(e)}")
-    
-    def _cancel(self):
-        """取消"""
-        self.result = None
-        self.destroy()
+    @property
+    def auth_path(self) -> Path:
+        return _brand_auth_json_path(self.brand)
 
+    @property
+    def agents_md_path(self) -> Path:
+        return _brand_agents_md_path(self.brand)
 
-# ████████████████████████████████████████████████████████████████████████████████
-# ██  MCP 编辑对话框
-# ████████████████████████████████████████████████████████████████████████████████
-
-class McpEditDialog(ctk.CTkToplevel):
-    """MCP 编辑对话框"""
-    
-    def __init__(self, parent, title: str, mcp_type: str = "remote", name: str = "", config: Dict = None):
-        super().__init__(parent)
-        self.title(title)
-        self.geometry("500x400")
-        self.transient(parent)
-        self.grab_set()
-        
-        self.result = None
-        self.mcp_type = mcp_type
-        
-        # 居中显示
-        self.update_idletasks()
-        x = parent.winfo_rootx() + (parent.winfo_width() - 500) // 2
-        y = parent.winfo_rooty() + (parent.winfo_height() - 400) // 2
-        self.geometry(f"+{x}+{y}")
-        
-        self._create_widgets(name, config or {})
-    
-    def _create_widgets(self, name: str, config: Dict):
-        """创建界面组件"""
-        # 名称
-        row = ctk.CTkFrame(self)
-        row.pack(fill="x", padx=20, pady=5)
-        ctk.CTkLabel(row, text="名称:", width=80, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left")
-        self.name_entry = ctk.CTkEntry(row, font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        self.name_entry.pack(side="left", fill="x", expand=True, padx=5)
-        if name:
-            self.name_entry.insert(0, name)
-        
-        # 类型选择
-        row = ctk.CTkFrame(self)
-        row.pack(fill="x", padx=20, pady=5)
-        ctk.CTkLabel(row, text="类型:", width=80, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left")
-        self.type_var = ctk.StringVar(value=self.mcp_type)
-        ctk.CTkOptionMenu(
-            row, values=["remote", "local"], variable=self.type_var,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL),
-            command=self._on_type_change
-        ).pack(side="left", padx=5)
-        
-        # URL (remote)
-        self.url_frame = ctk.CTkFrame(self)
-        self.url_frame.pack(fill="x", padx=20, pady=5)
-        ctk.CTkLabel(self.url_frame, text="URL:", width=80, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left")
-        self.url_entry = ctk.CTkEntry(self.url_frame, placeholder_text="https://mcp.example.com/mcp", font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        self.url_entry.pack(side="left", fill="x", expand=True, padx=5)
-        if "url" in config:
-            self.url_entry.insert(0, config["url"])
-        
-        # Command (local)
-        self.cmd_frame = ctk.CTkFrame(self)
-        self.cmd_frame.pack(fill="x", padx=20, pady=5)
-        ctk.CTkLabel(self.cmd_frame, text="命令:", width=80, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left")
-        self.cmd_entry = ctk.CTkEntry(self.cmd_frame, placeholder_text="npx -y @modelcontextprotocol/server-everything", font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        self.cmd_entry.pack(side="left", fill="x", expand=True, padx=5)
-        if "command" in config:
-            cmd = config["command"]
-            self.cmd_entry.insert(0, " ".join(cmd) if isinstance(cmd, list) else str(cmd))
-        
-        # Headers (remote)
-        self.headers_frame = ctk.CTkFrame(self)
-        self.headers_frame.pack(fill="x", padx=20, pady=5)
-        ctk.CTkLabel(self.headers_frame, text="Headers:", width=80, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left")
-        self.headers_entry = ctk.CTkEntry(self.headers_frame, placeholder_text='{"Authorization": "Bearer xxx"}', font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        self.headers_entry.pack(side="left", fill="x", expand=True, padx=5)
-        if "headers" in config:
-            self.headers_entry.insert(0, json.dumps(config["headers"]))
-        
-        # Environment (local)
-        self.env_frame = ctk.CTkFrame(self)
-        self.env_frame.pack(fill="x", padx=20, pady=5)
-        ctk.CTkLabel(self.env_frame, text="环境变量:", width=80, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left")
-        self.env_entry = ctk.CTkEntry(self.env_frame, placeholder_text='{"KEY": "value"}', font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        self.env_entry.pack(side="left", fill="x", expand=True, padx=5)
-        if "environment" in config:
-            self.env_entry.insert(0, json.dumps(config["environment"]))
-        
-        # Timeout
-        row = ctk.CTkFrame(self)
-        row.pack(fill="x", padx=20, pady=5)
-        ctk.CTkLabel(row, text="超时(ms):", width=80, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left")
-        self.timeout_entry = ctk.CTkEntry(row, placeholder_text="5000", font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        self.timeout_entry.pack(side="left", padx=5)
-        if "timeout" in config:
-            self.timeout_entry.insert(0, str(config["timeout"]))
-        
-        # Enabled
-        self.enabled_var = ctk.BooleanVar(value=config.get("enabled", True))
-        ctk.CTkCheckBox(
-            self, text="启用", variable=self.enabled_var,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        ).pack(anchor="w", padx=25, pady=5)
-        
-        # 按钮
-        btn_frame = ctk.CTkFrame(self)
-        btn_frame.pack(fill="x", padx=20, pady=15)
-        
-        ctk.CTkButton(
-            btn_frame, text="取消", command=self._cancel, width=80,
-            font=BTN_FONT
-        ).pack(side="right", padx=5)
-        
-        ctk.CTkButton(
-            btn_frame, text="确定", command=self._confirm, width=80,
-            font=BTN_FONT,
-            fg_color="green", hover_color="darkgreen"
-        ).pack(side="right", padx=5)
-        
-        # 根据类型显示/隐藏
-        self._on_type_change(self.mcp_type)
-    
-    def _on_type_change(self, mcp_type: str):
-        """类型变化时更新界面"""
-        if mcp_type == "remote":
-            self.url_frame.pack(fill="x", padx=20, pady=5)
-            self.headers_frame.pack(fill="x", padx=20, pady=5)
-            self.cmd_frame.pack_forget()
-            self.env_frame.pack_forget()
-        else:
-            self.url_frame.pack_forget()
-            self.headers_frame.pack_forget()
-            self.cmd_frame.pack(fill="x", padx=20, pady=5)
-            self.env_frame.pack(fill="x", padx=20, pady=5)
-    
-    def _confirm(self):
-        """确认"""
-        name = self.name_entry.get().strip()
-        if not name:
-            messagebox.showerror("错误", "请输入名称")
-            return
-        
-        mcp_type = self.type_var.get()
-        config = {
-            "type": mcp_type,
-            "enabled": self.enabled_var.get()
-        }
-        
-        if mcp_type == "remote":
-            url = self.url_entry.get().strip()
-            if not url:
-                messagebox.showerror("错误", "请输入 URL")
-                return
-            config["url"] = url
-            
-            headers_str = self.headers_entry.get().strip()
-            if headers_str:
-                try:
-                    config["headers"] = json.loads(headers_str)
-                except:
-                    messagebox.showerror("错误", "Headers 格式错误，应为 JSON")
-                    return
-        else:
-            cmd = self.cmd_entry.get().strip()
-            if not cmd:
-                messagebox.showerror("错误", "请输入命令")
-                return
-            config["command"] = cmd.split()
-            
-            env_str = self.env_entry.get().strip()
-            if env_str:
-                try:
-                    config["environment"] = json.loads(env_str)
-                except:
-                    messagebox.showerror("错误", "环境变量格式错误，应为 JSON")
-                    return
-        
-        timeout_str = self.timeout_entry.get().strip()
-        if timeout_str:
+    def load_config(self) -> Dict[str, Any]:
+        """安全加载主配置文件（保留完整原始结构）。"""
+        if self.config_path.exists():
             try:
-                config["timeout"] = int(timeout_str)
-            except:
-                messagebox.showerror("错误", "超时应为数字")
-                return
-        
-        self.result = {"name": name, "config": config}
-        self.destroy()
-    
-    def _cancel(self):
-        """取消"""
-        self.result = None
-        self.destroy()
-
-
-# ████████████████████████████████████████████████████████████████████████████████
-# ██  Provider 配置框架
-# ████████████████████████████████████████████████████████████████████████████████
-
-class ProviderFrame(ctk.CTkFrame):
-    """Provider 配置框架"""
-    
-    def __init__(self, parent, app):
-        super().__init__(parent)
-        self.app = app
-        self.providers = {}
-        self._create_widgets()
-    
-    def _create_widgets(self):
-        """创建界面组件"""
-        # 左右分栏
-        main_frame = ctk.CTkFrame(self)
-        main_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        # 左侧 - Provider 列表
-        left_frame = ctk.CTkFrame(main_frame, width=250)
-        left_frame.pack(side="left", fill="y", padx=5, pady=5)
-        left_frame.pack_propagate(False)
-        
-        self.provider_list = ctk.CTkScrollableFrame(left_frame)
-        self.provider_list.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        # 右侧 - Provider 详情
-        right_frame = ctk.CTkFrame(main_frame)
-        right_frame.pack(side="right", fill="both", expand=True, padx=5, pady=5)
-        
-        # 详情内容
-        detail_frame = ctk.CTkFrame(right_frame)
-        detail_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        # 名称
-        row = ctk.CTkFrame(detail_frame)
-        row.pack(fill="x", pady=5)
-        ctk.CTkLabel(row, text="名称:", width=120, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left", padx=5)
-        self.name_entry = ctk.CTkEntry(row, placeholder_text="my-provider", font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        self.name_entry.pack(side="left", fill="x", expand=True, padx=5)
-        
-        # 协议类型
-        row = ctk.CTkFrame(detail_frame)
-        row.pack(fill="x", pady=5)
-        ctk.CTkLabel(row, text="协议:", width=120, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left", padx=5)
-        self.protocol_var = ctk.StringVar(value="openai_standard")
-        self.protocol_menu = ctk.CTkOptionMenu(
-            row,
-            values=list(PROTOCOLS.keys()),
-            variable=self.protocol_var,
-            width=200,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        )
-        self.protocol_menu.pack(side="left", padx=5)
-        # 监听协议变化
-        self.protocol_var.trace_add("write", self._on_protocol_change)
-        
-        # Base URL
-        row = ctk.CTkFrame(detail_frame)
-        row.pack(fill="x", pady=5)
-        ctk.CTkLabel(row, text="Base URL:", width=120, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left", padx=5)
-        self.url_entry = ctk.CTkEntry(row, placeholder_text="https://api.example.com", font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        self.url_entry.pack(side="left", fill="x", expand=True, padx=5)
-        
-        # API Key
-        row = ctk.CTkFrame(detail_frame)
-        row.pack(fill="x", pady=5)
-        ctk.CTkLabel(row, text="API Key:", width=120, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left", padx=5)
-        self.api_key_entry = ctk.CTkEntry(row, placeholder_text="sk-...", show="*", font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        self.api_key_entry.pack(side="left", fill="x", expand=True, padx=5)
-        
-        self._api_key_visible = False
-        self._toggle_key_btn = ctk.CTkButton(
-            row, text="显示", width=60,
-            command=self._toggle_api_key_visibility,
-            font=BTN_FONT_SMALL
-        )
-        self._toggle_key_btn.pack(side="left", padx=5)
-        
-        # 模型配置区域标题和操作按钮
-        model_header = ctk.CTkFrame(detail_frame)
-        model_header.pack(fill="x", pady=(15, 5))
-        
-        ctk.CTkLabel(model_header, text="模型列表", font=(FONT_FAMILY, FONT_SIZE_LARGE, "bold")).pack(side="left", padx=5)
-        
-        # 探测状态标签
-        self.probe_status_label = ctk.CTkLabel(
-            model_header, text="", font=(FONT_FAMILY, FONT_SIZE_SMALL), text_color="gray"
-        )
-        self.probe_status_label.pack(side="left", padx=10)
-        
-        # Provider 操作按钮
-        self.remove_provider_btn = ctk.CTkButton(
-            model_header, text="删除 Provider", command=self._remove_provider, width=120,
-            font=BTN_FONT, fg_color="red", hover_color="darkred"
-        )
-        self.remove_provider_btn.pack(side="right", padx=5)
-        
-        self.add_provider_btn = ctk.CTkButton(
-            model_header, text="新建 Provider", command=self._add_provider, width=120,
-            font=BTN_FONT
-        )
-        self.add_provider_btn.pack(side="right", padx=5)
-        
-        self.add_model_btn = ctk.CTkButton(
-            model_header, text="手动添加", command=self._add_model_manual, width=100,
-            font=BTN_FONT
-        )
-        self.add_model_btn.pack(side="right", padx=5)
-        
-        self.probe_btn = ctk.CTkButton(
-            model_header, text="选择模型", command=self._select_models, width=100,
-            font=BTN_FONT
-        )
-        self.probe_btn.pack(side="right", padx=5)
-        
-        # 模型列表 - 可滚动区域
-        self.model_frame = ctk.CTkScrollableFrame(detail_frame, height=300)
-        self.model_frame.pack(fill="both", expand=True, pady=5)
-        
-        # 当前选中的 provider
-        self.current_provider = None
-        self.model_entries = []
-    
-    def _select_models(self):
-        """选择模型（探测并弹出选择对话框）"""
-        url = self.url_entry.get().strip()
-        api_key = self.api_key_entry.get().strip()
-        protocol = self.protocol_var.get()
-        
-        if not url:
-            self.app.show_status("请输入 Base URL", "error")
-            return
-        
-        if not api_key:
-            self.app.show_status("请输入 API Key", "error")
-            return
-        
-        # 确保有 provider
-        if not self.current_provider:
-            self._sync_current_provider()
-        
-        self.probe_status_label.configure(text="正在探测...", text_color="orange")
-        self.probe_btn.configure(state="disabled")
-        
-        def probe_thread():
-            try:
-                models = probe_models(url, api_key, protocol)
-                self.after(0, lambda: self._show_model_selector(models))
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    return parse_jsonc(f.read())
             except Exception as e:
-                self.after(0, lambda: self._on_probe_error(str(e)))
-        
-        threading.Thread(target=probe_thread, daemon=True).start()
-    
-    def _on_probe_error(self, error):
-        """探测失败回调"""
-        self.probe_btn.configure(state="normal")
-        self.probe_status_label.configure(text="探测失败", text_color="red")
-        self.app.show_status(f"探测失败: {error}", "error")
-    
-    def _show_model_selector(self, models):
-        """显示模型选择对话框"""
-        self.probe_btn.configure(state="normal")
-        self.probe_status_label.configure(text=f"发现 {len(models)} 个模型", text_color="green")
-        
-        # 获取已存在的模型ID
-        existing_ids = set()
-        if self.current_provider and self.current_provider in self.providers:
-            existing_ids = set(self.providers[self.current_provider].get("models", {}).keys())
-        
-        dialog = ModelSelectorDialog(self, models, existing_ids)
-        self.wait_window(dialog)
-        
-        if dialog.selected_models:
-            # 添加选中的模型到 provider
-            if self.current_provider and self.current_provider in self.providers:
-                provider = self.providers[self.current_provider]
-                for model_id in dialog.selected_models:
-                    if model_id not in provider.get("models", {}):
-                        provider.setdefault("models", {})[model_id] = {
-                            "name": model_id,
-                            "limit": {
-                                "context": 200000,
-                                "output": 32000
-                            },
-                            "modalities": {
-                                "input": ["text"],
-                                "output": ["text"]
-                            },
-                            "variants": default_model_variants(
-                                self.protocol_var.get(), model_id
-                            )
-                        }
-                self._refresh_model_list()
-                self.app.show_status(f"已添加 {len(dialog.selected_models)} 个模型", "success")
-                self.app.schedule_auto_save()
-    
-    def _sync_current_provider(self):
-        """同步当前 provider（如果编辑框有内容）"""
-        name = self.name_entry.get().strip()
-        if name:
-            self.current_provider = name
-            if name not in self.providers:
-                protocol = self.protocol_var.get()
-                self.providers[name] = {
-                    "npm": npm_for_protocol(protocol),
-                    "name": name,
-                    "options": {"baseURL": ""},
-                    "models": {}
-                }
-                self._refresh_provider_list()
-    
-    def _on_protocol_change(self, *args):
-        """协议变化时更新 npm 字段和版本端点。"""
-        if not self.current_provider or self.current_provider not in self.providers:
-            return
+                print(f"解析配置文件失败: {e}")
+        return {"$schema": _default_schema_url(self.brand)}
 
-        protocol = self.protocol_var.get()
-        previous_protocol = protocol_for_npm(
-            self.providers[self.current_provider].get("npm", "")
-        )
-        self.providers[self.current_provider]["npm"] = npm_for_protocol(protocol)
+    def load_providers_with_keys(self) -> Dict[str, Any]:
+        """加载 Providers 并关联合并 auth.json 中的 API Key。"""
+        cfg = self.load_config()
+        providers = cfg.get("provider", {})
+        auth_data = load_auth_json(self.brand)
 
-        if previous_protocol != protocol:
-            for model_id, model_config in self.providers[self.current_provider].get("models", {}).items():
-                model_config["variants"] = default_model_variants(protocol, model_id)
-            self._refresh_model_list()
+        for name, provider in providers.items():
+            if name in auth_data and "key" in auth_data[name]:
+                provider.setdefault("options", {})["apiKey"] = auth_data[name]["key"]
+        return providers
 
-        current_url = self.url_entry.get().strip()
-        if current_url:
-            normalized_url = ensure_protocol_endpoint(current_url, protocol)
-            self.url_entry.delete(0, "end")
-            self.url_entry.insert(0, normalized_url)
-            self.providers[self.current_provider].setdefault("options", {})["baseURL"] = normalized_url
-    
-    def _add_provider(self):
-        """添加新 Provider（根据编辑框内容命名）"""
-        current_name = self.name_entry.get().strip()
-        
-        if current_name and current_name not in self.providers:
-            # 如果编辑框有内容且该名称不存在，使用它
-            name = current_name
-        else:
-            # 否则生成新名称
-            base_name = "new-provider"
-            counter = 0
-            name = base_name
-            while name in self.providers:
-                counter += 1
-                name = f"{base_name}-{counter}"
-        
-        protocol = self.protocol_var.get()
-        self.providers[name] = {
-            "npm": npm_for_protocol(protocol),
-            "name": name,
-            "options": {"baseURL": ""},
-            "models": {}
-        }
-        self._select_provider(name)  # 这会自动刷新列表
-        self.app.schedule_auto_save()
-    
-    def _remove_provider(self):
-        """删除当前 Provider"""
-        if self.current_provider and self.current_provider in self.providers:
-            if messagebox.askyesno("确认", f"确定要删除 Provider '{self.current_provider}' 吗？"):
-                del self.providers[self.current_provider]
-                self.current_provider = None
-                self._refresh_provider_list()
-                self._clear_details()
-                self.app.schedule_auto_save()
-    
-    def _select_provider(self, name: str):
-        """选择 Provider"""
-        self.current_provider = name
-        if name in self.providers:
-            provider = self.providers[name]
-            self.name_entry.delete(0, "end")
-            self.name_entry.insert(0, name)
-            
-            options = provider.get("options", {})
-            self.url_entry.delete(0, "end")
-            self.url_entry.insert(0, options.get("baseURL", ""))
-            
-            self.api_key_entry.delete(0, "end")
-            self.api_key_entry.insert(0, options.get("apiKey", ""))
-            
-            npm = provider.get("npm", "@ai-sdk/openai-compatible")
-            self.protocol_var.set(protocol_for_npm(npm))
-            
-            self.probe_status_label.configure(text="")
-            self._refresh_model_list()
-            self._refresh_provider_list()  # 更新高亮
-    
-    def _toggle_api_key_visibility(self):
-        """切换 API Key 显示/隐藏"""
-        self._api_key_visible = not self._api_key_visible
-        if self._api_key_visible:
-            self.api_key_entry.configure(show="")
-            self._toggle_key_btn.configure(text="隐藏")
-        else:
-            self.api_key_entry.configure(show="*")
-            self._toggle_key_btn.configure(text="显示")
-    
-    def _refresh_provider_list(self):
-        """刷新 Provider 列表"""
-        for widget in self.provider_list.winfo_children():
-            widget.destroy()
-        
-        for name in self.providers:
-            btn = ctk.CTkButton(
-                self.provider_list,
-                text=name,
-                command=lambda n=name: self._select_provider(n),
-                anchor="w",
-                font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-            )
-            
-            # 选中的用主题蓝色，未选中的用默认灰色
-            if name == self.current_provider:
-                btn.configure(fg_color="#3B8ED0", hover_color="#1F6AA5")
-            else:
-                btn.configure(fg_color="gray60", hover_color="gray70")
-            
-            btn.pack(fill="x", pady=3)
-    
-    def _refresh_model_list(self):
-        """刷新模型列表"""
-        for widget in self.model_frame.winfo_children():
-            widget.destroy()
-        self.model_entries.clear()
-        
-        if not self.current_provider or self.current_provider not in self.providers:
-            return
-        
-        provider = self.providers[self.current_provider]
-        models = provider.get("models", {})
-        
-        for model_id, model_config in models.items():
-            self._create_model_entry(model_id, model_config)
-    
-    def _create_model_entry(self, model_id: str, model_config: Dict):
-        """创建模型配置条目"""
-        frame = ctk.CTkFrame(self.model_frame)
-        frame.pack(fill="x", pady=5)
-        
-        # 第一行：模型ID、测试、测速、删除
-        row1 = ctk.CTkFrame(frame)
-        row1.pack(fill="x", padx=5, pady=3)
-        
-        ctk.CTkLabel(row1, text="模型ID:", width=70, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left")
-        id_label = ctk.CTkLabel(row1, text=model_id, font=(FONT_FAMILY, FONT_SIZE_NORMAL), anchor="w")
-        id_label.pack(side="left", fill="x", expand=True, padx=5)
-        
-        # 删除按钮
-        del_btn = ctk.CTkButton(
-            row1, text="删除", width=60, fg_color="red", hover_color="darkred",
-            command=lambda: self._remove_model(model_id),
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        )
-        del_btn.pack(side="right", padx=3)
-        
-        # 测速按钮（黄色）
-        speed_btn = ctk.CTkButton(
-            row1, text="测速", width=60,
-            command=lambda: self._test_speed(model_id, speed_btn),
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL),
-            fg_color="#D4A017", hover_color="#B8860B"
-        )
-        speed_btn.pack(side="right", padx=3)
-        
-        # 测试按钮（绿色）
-        test_btn = ctk.CTkButton(
-            row1, text="测试", width=60,
-            command=lambda: self._test_model(model_id, test_btn),
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL),
-            fg_color="#2E8B57", hover_color="#228B22"
-        )
-        test_btn.pack(side="right", padx=3)
-        
-        # 第二行：上下文、最大输出、支持图像
-        row2 = ctk.CTkFrame(frame)
-        row2.pack(fill="x", padx=5, pady=3)
-        
-        ctk.CTkLabel(row2, text="上下文:", width=70, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left")
-        
-        # 从 limit.context 读取
-        limit = model_config.get("limit", {})
-        ctx_value = limit.get("context", 200000)
-        ctx_display = str(ctx_value // 1000) if ctx_value >= 1000 else str(ctx_value)
-        
-        ctx_entry = ctk.CTkEntry(row2, width=80, font=(FONT_FAMILY, FONT_SIZE_NORMAL), justify="center")
-        ctx_entry.pack(side="left", padx=5)
-        ctx_entry.insert(0, ctx_display)
-        
-        ctk.CTkLabel(row2, text="K", font=(FONT_FAMILY, FONT_SIZE_NORMAL, "bold"), text_color="#FFD700").pack(side="left")
-        
-        ctk.CTkLabel(row2, text="最大输出:", width=80, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left", padx=(15, 0))
-        
-        output_value = limit.get("output", 32000)
-        output_display = str(output_value // 1000) if output_value >= 1000 else str(output_value)
-        
-        output_entry = ctk.CTkEntry(row2, width=60, font=(FONT_FAMILY, FONT_SIZE_NORMAL), justify="center")
-        output_entry.pack(side="left", padx=5)
-        output_entry.insert(0, output_display)
-        
-        ctk.CTkLabel(row2, text="K", font=(FONT_FAMILY, FONT_SIZE_NORMAL, "bold"), text_color="#FFD700").pack(side="left")
-        
-        # 从 modalities 读取图像支持
-        modalities = model_config.get("modalities", {})
-        input_modalities = modalities.get("input", [])
-        supports_images = "image" in input_modalities
-        
-        img_var = ctk.BooleanVar(value=supports_images)
-        img_cb = ctk.CTkCheckBox(row2, text="支持图像", variable=img_var, font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        img_cb.pack(side="left", padx=15)
-        
-        # 第三行：思考字段名 + 变体强度
-        row3 = ctk.CTkFrame(frame)
-        row3.pack(fill="x", padx=5, pady=3)
-        
-        protocol = self.protocol_var.get()
-        thinking_field = thinking_field_for_model(protocol, model_id)
+    def save_config(
+        self,
+        providers: Dict[str, Any],
+        mcp: Dict[str, Any],
+        compaction: Dict[str, Any],
+        sync_to_other: bool = False,
+    ) -> bool:
+        """精准保存配置：
+        1. 仅更新管理的字段，保留未在界面开放的其他自定义配置
+        2. 将 API Key 提取并安全存储到 auth.json
+        3. 若启用同步，调用 sync_to_other_brand 进行精准合并
+        """
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if protocol != "gemini_native":
-            # 非 Gemini 协议继续兼容已有的自定义思考字段。
-            options = model_config.get("options", {})
-            if "reasoningEffort" in options:
-                thinking_field = "reasoningEffort"
-            elif "thinking" in options:
-                thinking_field = "thinking"
-            elif "variants" in model_config:
-                variants = model_config["variants"]
-                for variant in variants.values():
-                    if "reasoningEffort" in variant:
-                        thinking_field = "reasoningEffort"
-                        break
-                    if "thinking" in variant:
-                        thinking_field = "thinking"
-                        break
-        
-        ctk.CTkLabel(row3, text="思考:", width=50, font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left")
-        think_field_entry = ctk.CTkEntry(row3, placeholder_text=thinking_field, width=190, font=(FONT_FAMILY, FONT_SIZE_NORMAL), justify="center")
-        think_field_entry.pack(side="left", padx=3)
-        think_field_entry.insert(0, thinking_field)
-        
-        # 新增：禁用/启用变体按钮
-        variants_disabled = "variants" not in model_config
-        
-        toggle_btn = ctk.CTkButton(
-            row3, text="🚫" if variants_disabled else "✓", 
-            width=30,
-            fg_color="#F44336" if variants_disabled else "#4CAF50",
-            command=lambda idx=len(self.model_entries): self._toggle_variants(idx),
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        )
-        toggle_btn.pack(side="left", padx=3)
-        
-        # 变体容器
-        variants_frame = ctk.CTkFrame(row3)
-        variants_frame.pack(side="left", fill="x", expand=True, padx=5)
-        
-        # 收集变体强度列表
-        variant_levels = []
-        if "variants" in model_config:
-            variant_levels = list(model_config["variants"].keys())
-        elif "options" in model_config and thinking_field in model_config["options"]:
-            # Response 模式，只有一个强度
-            variant_levels = [model_config["options"][thinking_field]]
-        
-        # 如果没有变体，使用默认值（仅当不是禁用状态时）
-        if not variant_levels and not variants_disabled:
-            variant_levels = ["high"]
-        
-        # 变体标签和删除按钮
-        variant_widgets = []
-        for level in variant_levels:
-            self._add_variant_tag(variants_frame, level, variant_widgets, thinking_field)
-        
-        # 添加变体按钮
-        add_variant_btn = ctk.CTkButton(
-            row3, text="+", width=30,
-            command=lambda: self._add_variant_dialog(variants_frame, variant_widgets, thinking_field),
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        )
-        add_variant_btn.pack(side="left", padx=3)
-        
-        self.model_entries.append({
-            "frame": frame,
-            "id_label": id_label,
-            "id_entry": None,
-            "ctx_entry": ctx_entry,
-            "output_entry": output_entry,
-            "img_var": img_var,
-            "think_field_entry": think_field_entry,
-            "variants_frame": variants_frame,
-            "variant_widgets": variant_widgets,
-            "variants_disabled": variants_disabled,
-            "toggle_btn": toggle_btn,
-            "add_variant_btn": add_variant_btn,
-            "original_id": model_id
-        })
-        
-        # 初始状态下应用禁用状态
-        if variants_disabled:
-            self._apply_variants_disabled_state(len(self.model_entries) - 1, True)
-    
-    def _toggle_variants(self, entry_idx: int):
-        """切换变体的禁用/启用状态"""
-        entry = self.model_entries[entry_idx]
-        is_disabled = not entry.get("variants_disabled", False)
-        entry["variants_disabled"] = is_disabled
-        self._apply_variants_disabled_state(entry_idx, is_disabled)
-    
-    def _apply_variants_disabled_state(self, entry_idx: int, disabled: bool):
-        """应用变体禁用状态到 UI"""
-        entry = self.model_entries[entry_idx]
-        tf = entry["think_field_entry"]
-        af = entry["add_variant_btn"]
-        vf = entry["variants_frame"]
-        btn = entry["toggle_btn"]
-        
-        if disabled:
-            tf.configure(state="disabled")
-            af.configure(state="disabled")
-            # 禁用变体标签内的所有控件
-            for tag_frame in vf.winfo_children():
-                for widget in tag_frame.winfo_children():
-                    widget.configure(state="disabled")
-            btn.configure(text="🚫", fg_color="#F44336")
-        else:
-            tf.configure(state="normal")
-            af.configure(state="normal")
-            # 启用变体标签内的所有控件
-            for tag_frame in vf.winfo_children():
-                for widget in tag_frame.winfo_children():
-                    widget.configure(state="normal")
-            btn.configure(text="✓", fg_color="#4CAF50")
-    
-    def _test_model(self, model_id: str, btn: ctk.CTkButton):
-        """测试模型连通性"""
-        # 直接从 UI 读取配置
-        base_url = self.url_entry.get().strip()
-        api_key = self.api_key_entry.get().strip()
-        protocol = self.protocol_var.get()
-        
-        if not base_url or not api_key:
-            self.app.show_status("请先配置 Base URL 和 API Key", "error")
-            return
-        
-        btn.configure(text="测试中...", state="disabled")
-        
-        def test_thread():
+        existing_config = {}
+        if self.config_path.exists():
             try:
-                request_config = build_model_test_request(
-                    base_url,
-                    api_key,
-                    protocol,
-                    model_id,
-                    "此信息仅用于测试最快连通性，以最快的方式回答\"hello\"，不要任何思考",
-                    10,
-                )
-                response = requests.post(
-                    request_config["url"],
-                    json=request_config["payload"],
-                    headers=request_config["headers"],
-                    params=request_config["params"],
-                    timeout=15,
-                )
-                response.raise_for_status()
-                self.after(0, lambda: btn.configure(text="✓", state="normal", fg_color="green"))
-            except Exception as e:
-                self.after(0, lambda: btn.configure(text="✗", state="normal", fg_color="red"))
-                self.after(0, lambda: self.app.show_status(f"测试失败: {str(e)}", "error"))
-        
-        threading.Thread(target=test_thread, daemon=True).start()
-    
-    def _test_speed(self, model_id: str, btn: ctk.CTkButton):
-        """测试模型输出速度"""
-        # 直接从 UI 读取配置
-        base_url = self.url_entry.get().strip()
-        api_key = self.api_key_entry.get().strip()
-        protocol = self.protocol_var.get()
-        
-        if not base_url or not api_key:
-            self.app.show_status("请先配置 Base URL 和 API Key", "error")
-            return
-        
-        btn.configure(text="等待中", state="disabled")
-        
-        def speed_thread():
-            try:
-                request_config = build_model_test_request(
-                    base_url,
-                    api_key,
-                    protocol,
-                    model_id,
-                    "此信息仅用于测试最快输出速度，不要任何思考，以最快的方式回答1000个\"hello\"，以空格分割",
-                    2000,
-                    stream=True,
-                )
-                
-                start_time = None
-                token_count = 0
-                first_token_received = False
-                
-                response = requests.post(
-                    request_config["url"],
-                    json=request_config["payload"],
-                    headers=request_config["headers"],
-                    params=request_config["params"],
-                    timeout=15,
-                    stream=True,
-                )
-                response.raise_for_status()
-                
-                for line in response.iter_lines():
-                    if line:
-                        line_str = line.decode('utf-8')
-                        if line_str.startswith('data: ') and line_str != 'data: [DONE]':
-                            try:
-                                data = json.loads(line_str[6:])
-                                content = extract_stream_text(data, protocol)
-                                if content:
-                                    if not first_token_received:
-                                        first_token_received = True
-                                        start_time = time.time()
-                                        self.after(0, lambda: btn.configure(text="测速中"))
-
-                                    # 计算 hello 数量，保持现有测速口径。
-                                    token_count += content.lower().count('hello')
-
-                                    if start_time and time.time() - start_time >= 5:
-                                        elapsed = time.time() - start_time
-                                        speed = token_count / elapsed
-                                        self.after(0, lambda: btn.configure(text=f"{speed:.1f}t/s", state="normal"))
-                                        return
-                            except json.JSONDecodeError:
-                                continue
-                
-                # 如果流结束但没超过5秒
-                if start_time and token_count > 0:
-                    elapsed = time.time() - start_time
-                    speed = token_count / elapsed
-                    self.after(0, lambda: btn.configure(text=f"{speed:.1f}t/s", state="normal"))
-                else:
-                    self.after(0, lambda: btn.configure(text="测速", state="normal"))
-                    
-            except Exception as e:
-                self.after(0, lambda: btn.configure(text="测速", state="normal"))
-                self.after(0, lambda: self.app.show_status(f"测速失败: {str(e)}", "error"))
-        
-        threading.Thread(target=speed_thread, daemon=True).start()
-    
-    def _remove_model(self, model_id: str):
-        """删除模型"""
-        if self.current_provider and self.current_provider in self.providers:
-            provider = self.providers[self.current_provider]
-            if model_id in provider.get("models", {}):
-                del provider["models"][model_id]
-                self.after(10, self._refresh_model_list)
-                self.app.schedule_auto_save()
-    
-    def _add_variant_tag(self, parent, level: str, variant_widgets: list, thinking_field: str):
-        """添加变体标签"""
-        tag_frame = ctk.CTkFrame(parent)
-        tag_frame.pack(side="left", padx=2)
-        
-        label = ctk.CTkLabel(tag_frame, text=level, font=(FONT_FAMILY, FONT_SIZE_SMALL))
-        label.pack(side="left", padx=2)
-        
-        del_btn = ctk.CTkButton(
-            tag_frame, text="×", width=20, height=20,
-            command=lambda: self._remove_variant_tag(tag_frame, level, variant_widgets, thinking_field),
-            font=(FONT_FAMILY, FONT_SIZE_SMALL),
-            fg_color="red", hover_color="darkred"
-        )
-        del_btn.pack(side="left", padx=1)
-        
-        variant_widgets.append((tag_frame, level))
-    
-    def _remove_variant_tag(self, tag_frame, level: str, variant_widgets: list, thinking_field: str):
-        """删除变体标签"""
-        tag_frame.destroy()
-        variant_widgets[:] = [(f, l) for f, l in variant_widgets if l != level]
-    
-    def _add_variant_dialog(self, parent, variant_widgets: list, thinking_field: str):
-        """添加变体对话框"""
-        # 检查已存在的变体
-        existing_levels = [l for _, l in variant_widgets]
-        
-        # 可选的强度
-        if self.protocol_var.get() == "gemini_native":
-            all_levels = ["low", "medium", "high"]
-        else:
-            all_levels = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-        available_levels = [l for l in all_levels if l not in existing_levels]
-        
-        if not available_levels:
-            self.app.show_status("所有变体强度已添加", "warning")
-            return
-        
-        # 创建居中对话框
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("添加变体")
-        dialog.geometry("300x200")
-        dialog.transient(self)
-        dialog.grab_set()
-        
-        # 居中显示
-        dialog.update_idletasks()
-        x = self.winfo_rootx() + (self.winfo_width() - 300) // 2
-        y = self.winfo_rooty() + (self.winfo_height() - 200) // 2
-        dialog.geometry(f"+{x}+{y}")
-        
-        # 说明
-        ctk.CTkLabel(
-            dialog, text=f"可选: {', '.join(available_levels)}",
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        ).pack(pady=10)
-        
-        # 输入框
-        entry = ctk.CTkEntry(dialog, placeholder_text="输入强度", font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        entry.pack(pady=5)
-        
-        # 结果
-        result = {"value": None}
-        
-        def confirm():
-            result["value"] = entry.get().strip().lower()
-            dialog.destroy()
-        
-        def cancel():
-            dialog.destroy()
-        
-        # 按钮
-        btn_frame = ctk.CTkFrame(dialog)
-        btn_frame.pack(pady=10)
-        
-        ctk.CTkButton(btn_frame, text="取消", command=cancel, width=80, font=BTN_FONT).pack(side="left", padx=5)
-        ctk.CTkButton(btn_frame, text="确定", command=confirm, width=80, font=BTN_FONT, fg_color="green").pack(side="left", padx=5)
-        
-        # 绑定回车
-        entry.bind("<Return>", lambda e: confirm())
-        
-        # 等待对话框关闭
-        self.wait_window(dialog)
-        
-        level = result["value"]
-        if level:
-            if level in existing_levels:
-                self.app.show_status(f"变体 '{level}' 已存在", "error")
-                return
-            if level not in all_levels:
-                self.app.show_status(f"无效的强度: {level}", "error")
-                return
-            
-            self._add_variant_tag(parent, level, variant_widgets, thinking_field)
-    
-    def _add_model_manual(self):
-        """手动添加模型"""
-        if not self.current_provider or self.current_provider not in self.providers:
-            self.app.show_status("请先选择或创建一个 Provider", "error")
-            return
-        
-        model_id = ctk.CTkInputDialog(text="请输入模型 ID:", title="添加模型").get_input()
-        if model_id:
-            provider = self.providers[self.current_provider]
-            provider.setdefault("models", {})[model_id] = {
-                "name": model_id,
-                "limit": {
-                    "context": 200000,
-                    "output": 32000
-                },
-                "modalities": {
-                    "input": ["text"],
-                    "output": ["text"]
-                },
-                "variants": default_model_variants(
-                    self.protocol_var.get(), model_id
-                )
-            }
-            self._refresh_model_list()
-            self.app.schedule_auto_save()
-    
-    def _sync_ui_to_provider(self):
-        """将 UI 数据同步到当前 provider"""
-        if not self.current_provider or self.current_provider not in self.providers:
-            return
-        
-        old_name = self.current_provider
-        new_name = self.name_entry.get().strip()
-        
-        if not new_name:
-            return
-
-        protocol = self.protocol_var.get()
-
-        # 收集模型配置
-        models = {}
-        for entry in self.model_entries:
-            model_id = entry["original_id"]
-            if model_id:
-                # 解析上下文
-                try:
-                    ctx_str = entry["ctx_entry"].get().strip() or "200"
-                    context = int(ctx_str) * 1000
-                except ValueError:
-                    context = 200000
-                
-                # 解析输出
-                try:
-                    output_str = entry["output_entry"].get().strip() or "32"
-                    output = int(output_str) * 1000
-                except ValueError:
-                    output = 32000
-                
-                # 构建 limit 字段
-                limit = {
-                    "context": context,
-                    "output": output
-                }
-                
-                # 构建 modalities 字段
-                modalities = {
-                    "input": ["text", "image"] if entry["img_var"].get() else ["text"],
-                    "output": ["text"]
-                }
-                
-                # 思考配置
-                thinking_field = entry["think_field_entry"].get().strip() or "reasoningEffort"
-                
-                # 收集变体强度列表
-                variant_widgets = entry.get("variant_widgets", [])
-                variant_levels = [level for _, level in variant_widgets]
-                
-                model_cfg = {
-                    "limit": limit,
-                    "modalities": modalities
-                }
-                
-                # 生成变体配置（两种模式都使用 variants）
-                # 仅在未禁用时生成
-                if not entry.get("variants_disabled", False) and thinking_field and variant_levels:
-                    variants = {}
-                    for level in variant_levels:
-                        variants[level] = build_variant_option(
-                            protocol, model_id, level, thinking_field
-                        )
-                    model_cfg["variants"] = variants
-                
-                models[model_id] = model_cfg
-        
-        # 获取现有的 provider 配置（保留其他字段）
-        existing_provider = self.providers.get(old_name, {}).copy()
-        
-        existing_provider["npm"] = npm_for_protocol(protocol)
-        
-        # 更新 provider 配置
-        existing_provider["name"] = new_name
-        existing_provider["options"] = {
-            "baseURL": clean_base_url(self.url_entry.get().strip()),
-            "apiKey": self.api_key_entry.get().strip()
-        }
-        existing_provider["models"] = models
-        
-        # 更新 providers 字典
-        if old_name != new_name and old_name in self.providers:
-            del self.providers[old_name]
-        self.providers[new_name] = existing_provider
-        self.current_provider = new_name
-    
-    def _clear_details(self):
-        """清空详情"""
-        self.name_entry.delete(0, "end")
-        self.url_entry.delete(0, "end")
-        self.api_key_entry.delete(0, "end")
-        self.probe_status_label.configure(text="")
-        for widget in self.model_frame.winfo_children():
-            widget.destroy()
-        self.model_entries.clear()
-    
-    def load_providers(self, providers: Dict):
-        """加载 Provider 配置"""
-        self.providers = providers
-        self._refresh_provider_list()
-    
-    def get_providers(self) -> Dict:
-        """获取 Provider 配置（同步 UI 数据，过滤空 provider）"""
-        self._sync_ui_to_provider()
-        
-        # 过滤掉没有 baseURL 的空 provider
-        filtered = {}
-        for name, provider in self.providers.items():
-            base_url = provider.get("options", {}).get("baseURL", "").strip()
-            if base_url:  # 只保留有 baseURL 的 provider
-                filtered[name] = provider
-        
-        return filtered
-
-
-# ████████████████████████████████████████████████████████████████████████████████
-# ██  MCP 服务器和上下文压缩配置框架
-# ████████████████████████████████████████████████████████████████████████████████
-
-class McpCompactionFrame(ctk.CTkFrame):
-    """MCP 服务器和上下文压缩配置框架"""
-    
-    def __init__(self, parent, app):
-        super().__init__(parent)
-        self.app = app
-        self.mcp_servers = {}
-        self._create_widgets()
-    
-    def _create_widgets(self):
-        """创建界面组件"""
-        # ========== MCP 服务器管理 ==========
-        mcp_label = ctk.CTkLabel(self, text="MCP 服务器", font=(FONT_FAMILY, FONT_SIZE_LARGE, "bold"))
-        mcp_label.pack(anchor="w", padx=20, pady=(15, 5))
-        
-        # MCP 列表和操作按钮
-        mcp_frame = ctk.CTkFrame(self)
-        mcp_frame.pack(fill="both", expand=True, padx=20, pady=5)
-        
-        # MCP 列表
-        self.mcp_list = ctk.CTkScrollableFrame(mcp_frame, height=200)
-        self.mcp_list.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        # 按钮行
-        btn_row = ctk.CTkFrame(mcp_frame)
-        btn_row.pack(fill="x", padx=5, pady=5)
-        
-        ctk.CTkButton(
-            btn_row, text="添加 MCP", command=self._add_mcp, width=100,
-            font=BTN_FONT
-        ).pack(side="left", padx=5)
-        
-        ctk.CTkButton(
-            btn_row, text="JSON 导入", command=self._import_mcp_json, width=100,
-            font=BTN_FONT,
-            fg_color="#D4A017", hover_color="#B8860B"
-        ).pack(side="left", padx=5)
-        
-        # ========== 上下文压缩 ==========
-        compaction_label = ctk.CTkLabel(self, text="上下文压缩", font=(FONT_FAMILY, FONT_SIZE_LARGE, "bold"))
-        compaction_label.pack(anchor="w", padx=20, pady=(20, 5))
-        
-        # 压缩选项 - 同一行
-        compaction_frame = ctk.CTkFrame(self)
-        compaction_frame.pack(fill="x", padx=20, pady=5)
-        
-        self.auto_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            compaction_frame, text="自动压缩", variable=self.auto_var,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        ).pack(side="left", padx=15, pady=10)
-        
-        self.prune_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            compaction_frame, text="清理旧输出", variable=self.prune_var,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        ).pack(side="left", padx=15, pady=10)
-        
-        ctk.CTkLabel(
-            compaction_frame, text="缓冲区:", font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        ).pack(side="left", padx=(15, 5), pady=10)
-        
-        self.reserved_entry = ctk.CTkEntry(
-            compaction_frame, placeholder_text="20", width=100,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL), justify="center"
-        )
-        self.reserved_entry.pack(side="left", padx=5, pady=10)
-
-        ctk.CTkLabel(
-            compaction_frame, text="K", font=(FONT_FAMILY, FONT_SIZE_NORMAL, "bold"), text_color="#FFD700"
-        ).pack(side="left")
-        
-        # 说明
-        info_label = ctk.CTkLabel(
-            self, text="说明: 压缩触发点 = context - reserved（默认约90%）",
-            font=(FONT_FAMILY, FONT_SIZE_SMALL), text_color="gray"
-        )
-        info_label.pack(anchor="w", padx=25, pady=(0, 10))
-    
-    def _refresh_mcp_list(self):
-        """刷新 MCP 列表"""
-        for widget in self.mcp_list.winfo_children():
-            widget.destroy()
-        
-        for name, config in self.mcp_servers.items():
-            self._create_mcp_entry(name, config)
-    
-    def _create_mcp_entry(self, name: str, config: Dict):
-        """创建 MCP 条目"""
-        frame = ctk.CTkFrame(self.mcp_list)
-        frame.pack(fill="x", pady=3)
-        
-        # 绑定双击事件
-        frame.bind("<Double-Button-1>", lambda e, n=name: self._edit_mcp(n))
-        
-        # 名称和类型
-        mcp_type = config.get("type", "unknown")
-        type_color = "#4CAF50" if mcp_type == "local" else "#2196F3"
-        
-        info_frame = ctk.CTkFrame(frame)
-        info_frame.pack(fill="x", padx=5, pady=5)
-        info_frame.bind("<Double-Button-1>", lambda e, n=name: self._edit_mcp(n))
-        
-        name_label = ctk.CTkLabel(
-            info_frame, text=name, font=(FONT_FAMILY, FONT_SIZE_NORMAL, "bold")
-        )
-        name_label.pack(side="left", padx=5)
-        name_label.bind("<Double-Button-1>", lambda e, n=name: self._edit_mcp(n))
-        
-        type_label = ctk.CTkLabel(
-            info_frame, text=f"[{mcp_type}]", font=(FONT_FAMILY, FONT_SIZE_SMALL),
-            text_color=type_color
-        )
-        type_label.pack(side="left", padx=5)
-        type_label.bind("<Double-Button-1>", lambda e, n=name: self._edit_mcp(n))
-        
-        # URL 或 command
-        if mcp_type == "remote":
-            detail = config.get("url", "")
-        else:
-            cmd = config.get("command", [])
-            detail = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-        
-        detail_label = ctk.CTkLabel(
-            info_frame, text=detail, font=(FONT_FAMILY, FONT_SIZE_SMALL),
-            text_color="gray"
-        )
-        detail_label.pack(side="left", padx=10, fill="x", expand=True)
-        detail_label.bind("<Double-Button-1>", lambda e, n=name: self._edit_mcp(n))
-        
-        # 启用/禁用
-        enabled_var = ctk.BooleanVar(value=config.get("enabled", True))
-        ctk.CTkCheckBox(
-            info_frame, text="", variable=enabled_var, width=20,
-            command=lambda n=name, v=enabled_var: self._toggle_mcp(n, v.get())
-        ).pack(side="right", padx=5)
-        
-        # 删除按钮
-        ctk.CTkButton(
-            info_frame, text="删除", width=50, fg_color="red", hover_color="darkred",
-            command=lambda n=name: self._remove_mcp(n),
-            font=(FONT_FAMILY, FONT_SIZE_SMALL)
-        ).pack(side="right", padx=5)
-    
-    def _edit_mcp(self, name: str):
-        """编辑 MCP"""
-        if name not in self.mcp_servers:
-            return
-        
-        config = self.mcp_servers[name]
-        mcp_type = config.get("type", "remote")
-        
-        dialog = McpEditDialog(self, f"编辑 MCP: {name}", mcp_type=mcp_type, name=name, config=config)
-        self.wait_window(dialog)
-        
-        if dialog.result:
-            # 删除旧的，添加新的
-            if dialog.result["name"] != name:
-                del self.mcp_servers[name]
-            self.mcp_servers[dialog.result["name"]] = dialog.result["config"]
-            self._refresh_mcp_list()
-    
-    def _toggle_mcp(self, name: str, enabled: bool):
-        """切换 MCP 启用状态"""
-        if name in self.mcp_servers:
-            self.mcp_servers[name]["enabled"] = enabled
-            self.app.schedule_auto_save()
-    
-    def _remove_mcp(self, name: str):
-        """删除 MCP"""
-        if name in self.mcp_servers:
-            del self.mcp_servers[name]
-            self._refresh_mcp_list()
-            self.app.schedule_auto_save()
-    
-    def _add_mcp(self):
-        """添加 MCP"""
-        dialog = McpEditDialog(self, "添加 MCP")
-        self.wait_window(dialog)
-        if dialog.result:
-            self.mcp_servers[dialog.result["name"]] = dialog.result["config"]
-            self._refresh_mcp_list()
-            self.app.schedule_auto_save()
-    
-    def _import_mcp_json(self):
-        """从 JSON 导入 MCP"""
-        dialog = JsonImportDialog(self)
-        self.wait_window(dialog)
-        
-        if not dialog.result:
-            return
-        
-        try:
-            data = dialog.result
-            
-            # 处理各种外层包装
-            if "mcpServers" in data:
-                data = data["mcpServers"]
-            elif "mcp" in data:
-                data = data["mcp"]
-            
-            # 规范化配置（兼容 Cursor/Windsurf/OpenCode/KiloCode 格式）
-            normalized = normalize_mcp_config(data)
-            
-            # 导入 MCP 配置
-            imported_count = 0
-            for name, config in normalized.items():
-                self.mcp_servers[name] = config
-                imported_count += 1
-            
-            if imported_count > 0:
-                self._refresh_mcp_list()
-                self.app.show_status(f"成功导入 {imported_count} 个 MCP", "success")
-                self.app.schedule_auto_save()
-            else:
-                messagebox.showerror("错误", "未找到有效的 MCP 配置")
-                
-        except Exception as e:
-            messagebox.showerror("错误", f"导入失败: {str(e)}")
-    
-    def load_mcp(self, mcp: Dict):
-        """加载 MCP 配置"""
-        self.mcp_servers = normalize_mcp_config(mcp)
-        self._refresh_mcp_list()
-    
-    def get_mcp(self) -> Dict:
-        """获取 MCP 配置"""
-        return self.mcp_servers
-    
-    def load_compaction(self, config: Dict):
-        """加载压缩配置"""
-        self.auto_var.set(config.get("auto", True))
-        self.prune_var.set(config.get("prune", True))
-        
-        reserved_value = int(config.get("reserved", 20000))
-        self.reserved_entry.delete(0, "end")
-        self.reserved_entry.insert(0, _to_k_display(reserved_value))
-    
-    def get_compaction(self) -> Dict:
-        """获取压缩配置"""
-        return {
-            "auto": self.auto_var.get(),
-            "prune": self.prune_var.get(),
-            "reserved": _parse_k_display(self.reserved_entry.get(), default_k_value=20)
-        }
-
-
-# ████████████████████████████████████████████████████████████████████████████████
-# ██  提示词文件编辑框架
-# ████████████████████████████████████████████████████████████████████████████████
-
-class InstructionsFrame(ctk.CTkFrame):
-    """提示词文件编辑框架"""
-    
-    def __init__(self, parent, app):
-        super().__init__(parent)
-        self.app = app
-        self.agents_md_path = get_agents_md_path()
-        self._create_widgets()
-        self._load_file()
-    
-    def _create_widgets(self):
-        """创建界面组件"""
-        # 文件路径
-        path_frame = ctk.CTkFrame(self)
-        path_frame.pack(fill="x", padx=20, pady=5)
-        
-        ctk.CTkLabel(path_frame, text="文件路径:", font=(FONT_FAMILY, FONT_SIZE_NORMAL)).pack(side="left", padx=5)
-        self.path_label = ctk.CTkLabel(
-            path_frame, text=str(self.agents_md_path), 
-            font=(FONT_FAMILY, FONT_SIZE_SMALL), text_color="gray"
-        )
-        self.path_label.pack(side="left", fill="x", expand=True, padx=5)
-        
-        self.open_folder_btn = ctk.CTkButton(
-            path_frame, text="打开目录", width=100,
-            command=self._open_folder,
-            font=BTN_FONT
-        )
-        self.open_folder_btn.pack(side="right", padx=5)
-        
-        # 编辑器
-        self.text_editor = ctk.CTkTextbox(self, wrap="word", font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        self.text_editor.pack(fill="both", expand=True, padx=20, pady=10)
-        
-        # 修复粘贴重复问题：手动处理粘贴事件
-        self.text_editor.bind("<Control-v>", self._on_paste)
-        self.text_editor.bind("<Control-V>", self._on_paste)
-        
-        # 按钮框架
-        btn_frame = ctk.CTkFrame(self)
-        btn_frame.pack(fill="x", padx=20, pady=10)
-        
-        self.reload_btn = ctk.CTkButton(
-            btn_frame, text="重新加载", command=self._load_file, width=120,
-            font=BTN_FONT
-        )
-        self.reload_btn.pack(side="left", padx=5)
-        
-        self.save_btn = ctk.CTkButton(
-            btn_frame, text="保存提示词", command=self._save_file,
-            fg_color="green", hover_color="darkgreen", width=120,
-            font=BTN_FONT
-        )
-        self.save_btn.pack(side="right", padx=5)
-    
-    def _on_paste(self, event=None):
-        """处理粘贴事件，修复 CTkTextbox 粘贴重复问题"""
-        try:
-            # 删除选中的文本
-            try:
-                self.text_editor.delete("sel.first", "sel.last")
-            except:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    existing_config = parse_jsonc(f.read())
+            except Exception:
                 pass
-            
-            # 获取剪贴板内容
-            clipboard = self.clipboard_get()
-            
-            # 插入剪贴板内容
-            self.text_editor.insert("insert", clipboard)
-            
-            return "break"  # 阻止默认的粘贴行为
-        except:
-            return None
-    
-    def _load_file(self):
-        """加载文件内容"""
-        self.text_editor.delete("1.0", "end")
-        
-        if self.agents_md_path.exists():
+
+        if "$schema" not in existing_config:
+            existing_config["$schema"] = _default_schema_url(self.brand)
+
+        auth_data = load_auth_json(self.brand)
+
+        if providers:
+            existing_providers = existing_config.get("provider", {})
+            for name, provider in providers.items():
+                api_key = provider.get("options", {}).get("apiKey", "")
+                if api_key:
+                    auth_data[name] = {"type": "api", "key": api_key}
+
+                existing_provider = existing_providers.get(name, {})
+                if "npm" in provider:
+                    existing_provider["npm"] = provider["npm"]
+                if "name" in provider:
+                    existing_provider["name"] = provider["name"]
+
+                existing_options = existing_provider.get("options", {})
+                protocol = protocol_for_npm(provider.get("npm", ""))
+                raw_base_url = provider.get("options", {}).get("baseURL", "")
+                existing_options["baseURL"] = ensure_protocol_endpoint(raw_base_url, protocol)
+                existing_provider["options"] = existing_options
+
+                # 更新 models
+                existing_models = existing_provider.get("models", {})
+                ui_model_ids = set(provider.get("models", {}).keys())
+
+                for model_id, model_data in provider.get("models", {}).items():
+                    existing_model = existing_models.get(model_id, {})
+                    if "limit" in model_data:
+                        existing_model["limit"] = model_data["limit"]
+                    if "modalities" in model_data:
+                        existing_model["modalities"] = model_data["modalities"]
+
+                    options = model_data.get("options", {})
+                    if options:
+                        existing_model["options"] = options
+
+                    variants = model_data.get("variants", {})
+                    if variants:
+                        existing_model["variants"] = variants
+                    elif "variants" in existing_model and not variants:
+                        del existing_model["variants"]
+
+                    existing_models[model_id] = existing_model
+
+                # 删除已移除的模型
+                for model_id in list(existing_models.keys()):
+                    if model_id not in ui_model_ids:
+                        del existing_models[model_id]
+
+                existing_provider["models"] = existing_models
+                existing_providers[name] = existing_provider
+
+            # 删除已移除的 provider
+            for name in list(existing_providers.keys()):
+                if name not in providers:
+                    del existing_providers[name]
+
+            existing_config["provider"] = existing_providers
+
+        if compaction:
+            existing_config["compaction"] = compaction
+        if mcp is not None:
+            existing_config["mcp"] = mcp
+
+        # 保存主配置文件
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump(existing_config, f, indent=2, ensure_ascii=False)
+
+        # 保存 auth.json
+        save_auth_json(auth_data, self.brand)
+
+        if sync_to_other:
+            self.sync_to_other_brand(existing_config, auth_data)
+
+        return True
+
+    def sync_to_other_brand(self, source_config: Dict[str, Any], auth_data: Dict[str, Any]):
+        """无损精准合并当前品牌配置到目标品牌。"""
+        target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
+        target_config_path = _brand_config_path(target_brand)
+        target_agents_path = _brand_agents_md_path(target_brand)
+
+        target_config_path.parent.mkdir(parents=True, exist_ok=True)
+        _brand_auth_json_path(target_brand).parent.mkdir(parents=True, exist_ok=True)
+        target_agents_path.parent.mkdir(parents=True, exist_ok=True)
+
+        target_config = {}
+        if target_config_path.exists():
             try:
-                content = self.agents_md_path.read_text(encoding="utf-8")
-                self.text_editor.insert("1.0", content)
-            except Exception as e:
-                self.app.show_status(f"读取文件失败: {str(e)}", "error")
-        else:
-            self.text_editor.insert("1.0", "# 全局提示词\n\n在此添加全局指令...")
-    
-    def _save_file(self):
-        """保存文件"""
+                with open(target_config_path, "r", encoding="utf-8") as f:
+                    target_config = parse_jsonc(f.read())
+            except Exception:
+                pass
+
+        if "$schema" not in target_config:
+            target_config["$schema"] = _default_schema_url(target_brand)
+
+        # 精准合并 Provider
+        if "provider" in source_config:
+            source_providers = source_config["provider"]
+            target_providers = target_config.get("provider", {})
+
+            for name, source_provider in source_providers.items():
+                if name in target_providers:
+                    target_provider = target_providers[name]
+                    target_provider["npm"] = source_provider.get("npm", target_provider.get("npm"))
+                    target_provider["name"] = source_provider.get("name", target_provider.get("name"))
+
+                    target_options = target_provider.get("options", {})
+                    source_options = source_provider.get("options", {})
+                    if "baseURL" in source_options:
+                        target_options["baseURL"] = source_options["baseURL"]
+                    target_provider["options"] = target_options
+
+                    # 合并 models
+                    target_models = target_provider.get("models", {})
+                    source_models = source_provider.get("models", {})
+                    for model_id, source_model in source_models.items():
+                        target_model = target_models.get(model_id, {})
+                        if "limit" in source_model:
+                            target_model["limit"] = source_model["limit"]
+                        if "modalities" in source_model:
+                            target_model["modalities"] = source_model["modalities"]
+                        if "options" in source_model:
+                            target_model["options"] = source_model["options"]
+                        if "variants" in source_model:
+                            target_model["variants"] = source_model["variants"]
+                        elif "variants" in target_model:
+                            del target_model["variants"]
+                        target_models[model_id] = target_model
+
+                    for model_id in list(target_models.keys()):
+                        if model_id not in source_models:
+                            del target_models[model_id]
+
+                    target_provider["models"] = target_models
+                    target_providers[name] = target_provider
+                else:
+                    target_providers[name] = source_provider
+
+            for name in list(target_providers.keys()):
+                if name not in source_providers:
+                    del target_providers[name]
+
+            target_config["provider"] = target_providers
+
+        # 精准合并 MCP
+        if "mcp" in source_config:
+            source_mcp = source_config["mcp"]
+            target_mcp = target_config.get("mcp", {})
+
+            for name, source_server in source_mcp.items():
+                if name in target_mcp:
+                    target_server = target_mcp[name]
+                    for key in ["type", "command", "url", "enabled", "environment", "env", "headers"]:
+                        if key in source_server:
+                            target_server[key] = source_server[key]
+                    target_mcp[name] = target_server
+                else:
+                    target_mcp[name] = source_server
+
+            for name in list(target_mcp.keys()):
+                if name not in source_mcp:
+                    del target_mcp[name]
+
+            target_config["mcp"] = target_mcp
+
+        # 合并 compaction
+        if "compaction" in source_config:
+            target_config["compaction"] = source_config["compaction"]
+
+        with open(target_config_path, "w", encoding="utf-8") as f:
+            json.dump(target_config, f, indent=2, ensure_ascii=False)
+
+        if auth_data:
+            save_auth_json(auth_data, target_brand)
+
+        if self.agents_md_path.exists():
+            content = self.agents_md_path.read_text(encoding="utf-8")
+            target_agents_path.write_text(content, encoding="utf-8")
+
+    def get_config_hash(self) -> str:
+        """获取当前配置文件的 MD5 哈希。"""
+        if not self.config_path.exists():
+            return ""
         try:
-            self.agents_md_path.parent.mkdir(parents=True, exist_ok=True)
-            content = self.text_editor.get("1.0", "end-1c")
-            self.agents_md_path.write_text(content, encoding="utf-8")
-            self.app.show_status("提示词已保存", "success")
-        except Exception as e:
-            self.app.show_status(f"保存文件失败: {str(e)}", "error")
-    
-    def _open_folder(self):
-        """打开文件所在目录"""
-        folder = self.agents_md_path.parent
-        if folder.exists():
-            system = platform.system()
-            if system == "Windows":
-                os.startfile(folder)
-            elif system == "Darwin":
-                os.system(f'open "{folder}"')
-            else:
-                os.system(f'xdg-open "{folder}"')
-
-    def switch_agents_path(self, new_path: Path):
-        """切换 AGENTS.md 路径并刷新界面"""
-        self.agents_md_path = new_path
-        self.path_label.configure(text=str(self.agents_md_path))
-        self._load_file()
-
-
-# ████████████████████████████████████████████████████████████████████████████████
-# ██  主应用窗口
-# ████████████████████████████████████████████████████████████████████████████████
-
-class App(ctk.CTk):
-    """主应用窗口"""
-    
-    def __init__(self):
-        super().__init__()
-        
-        self.title(APP_NAME)
-        self.geometry(WINDOW_SIZE)
-        self.minsize(1600, 900)
-        
-        # 设置主题
-        ctk.set_appearance_mode("system")
-        ctk.set_default_color_theme("blue")
-        
-        # 加载程序设置
-        self._app_settings = load_app_settings()
-        
-        # 品牌状态（从设置加载，默认 OpenCode）
-        self.brand = self._app_settings.get("brand", "OpenCode")
-        
-        # 配置文件路径
-        self.config_path = get_opencode_config_path()
-        self.agents_md_path = get_agents_md_path()
-        self.config = {}
-        
-        # 自动保存状态（从设置加载）
-        self.auto_save_var = ctk.BooleanVar(value=self._app_settings.get("auto_save", True))
-        self._auto_save_job = None
-        
-        # 同步修改状态（从设置加载）
-        self.sync_enabled_var = ctk.BooleanVar(value=self._app_settings.get("sync_enabled", False))
-        
-        # 配置变更检测（轮询方式）
-        self._config_hash = ""
-        self._config_check_job = None
-        
-        self._create_widgets()
-        self._apply_brand(self.brand)
-        self._load_config(silent=True)
-        self._start_config_watch()
-    
-    def _create_widgets(self):
-        """创建主界面组件"""
-        # 顶部工具栏
-        toolbar = ctk.CTkFrame(self, height=45)
-        toolbar.pack(fill="x", padx=10, pady=(2, 1))
-        toolbar.pack_propagate(False)
-        
-        # 标题区域：品牌下拉融入标题
-        title_frame = ctk.CTkFrame(toolbar, fg_color="transparent")
-        title_frame.pack(side="left", padx=10)
-
-        self.brand_var = ctk.StringVar(value=self.brand)
-        self.brand_menu = ctk.CTkOptionMenu(
-            title_frame,
-            values=["OpenCode", "KiloCode"],
-            variable=self.brand_var,
-            command=self._apply_brand,
-            width=160,
-            font=(FONT_FAMILY, FONT_SIZE_TITLE, "bold"),
-            dropdown_font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        )
-        self.brand_menu.pack(side="left")
-
-        ctk.CTkLabel(
-            title_frame, text="配置编辑器", font=(FONT_FAMILY, FONT_SIZE_TITLE, "bold")
-        ).pack(side="left", padx=(5, 0))
-        
-        # 配置文件路径显示
-        self.config_path_label = ctk.CTkLabel(
-            toolbar, text=f"配置: {self.config_path}",
-            font=(FONT_FAMILY, FONT_SIZE_SMALL), text_color="gray",
-            width=350, anchor="w"
-        )
-        self.config_path_label.pack(side="left", padx=(20, 0))
-
-        # 自动保存开关
-        self.auto_save_cb = ctk.CTkCheckBox(
-            toolbar, text="自动保存", variable=self.auto_save_var,
-            font=(FONT_FAMILY, FONT_SIZE_SMALL),
-            checkbox_width=18, checkbox_height=18,
-            command=self._on_auto_save_changed
-        )
-        self.auto_save_cb.pack(side="left", padx=10)
-
-        # 同步修改开关
-        self.sync_enabled_cb = ctk.CTkCheckBox(
-            toolbar, text="同步修改", variable=self.sync_enabled_var,
-            font=(FONT_FAMILY, FONT_SIZE_SMALL),
-            checkbox_width=18, checkbox_height=18,
-            command=self._on_sync_enabled_changed
-        )
-        self.sync_enabled_cb.pack(side="left", padx=10)
-        
-        # 按钮（从右往左排列）
-        self.reload_btn = ctk.CTkButton(
-            toolbar, text="重新加载", command=lambda: self._load_config(silent=False), width=100,
-            font=(FONT_FAMILY, FONT_SIZE_NORMAL)
-        )
-        self.reload_btn.pack(side="right", padx=5)
-        
-        self.save_btn = ctk.CTkButton(
-            toolbar, text="保存配置", command=self._save_config,
-            fg_color="green", hover_color="darkgreen", width=100,
-            font=BTN_FONT
-        )
-        self.save_btn.pack(side="right", padx=5)
-        
-        self.open_config_btn = ctk.CTkButton(
-            toolbar, text="打开配置文件", command=self._open_config_file, width=120,
-            font=BTN_FONT
-        )
-        self.open_config_btn.pack(side="right", padx=5)
-        
-        self.export_btn = ctk.CTkButton(
-            toolbar, text="导出配置", command=self._export_config, width=100,
-            font=BTN_FONT,
-            fg_color="#D4A017", hover_color="#B8860B"
-        )
-        self.export_btn.pack(side="right", padx=5)
-
-        self.sync_btn = ctk.CTkButton(
-            toolbar, text="同步到...", command=self._sync_to_other_brand, width=100,
-            font=BTN_FONT,
-            fg_color="#6A5ACD", hover_color="#483D8B"
-        )
-        self.sync_btn.pack(side="right", padx=5)
-        
-        # 状态栏（独立行，不遮挡按钮）
-        status_bar = ctk.CTkFrame(self, height=24, fg_color="transparent")
-        status_bar.pack(fill="x", padx=10, pady=0)
-        status_bar.pack_propagate(False)
-        
-        self.status_label = ctk.CTkLabel(
-            status_bar, text="", font=(FONT_FAMILY, FONT_SIZE_SMALL),
-            anchor="w"
-        )
-        self.status_label.pack(side="left", padx=15)
-        
-        # 主内容区域 - 标签页
-        self.tabview = ctk.CTkTabview(self)
-        self.tabview.pack(fill="both", expand=True, padx=10, pady=(0, 3))
-        
-        # 创建标签页
-        self.tab_provider = self.tabview.add("Provider 管理")
-        self.tab_mcp_compaction = self.tabview.add("MCP与上下文")
-        self.tab_instructions = self.tabview.add("全局提示词")
-        
-        # 设置标签字体
-        self.tabview._segmented_button.configure(font=(FONT_FAMILY, FONT_SIZE_NORMAL))
-        
-        # Provider 标签页
-        self.provider_frame = ProviderFrame(self.tab_provider, self)
-        self.provider_frame.pack(fill="both", expand=True)
-        
-        # MCP与上下文标签页
-        self.mcp_compaction_frame = McpCompactionFrame(self.tab_mcp_compaction, self)
-        self.mcp_compaction_frame.pack(fill="both", expand=True)
-        
-        # 提示词标签页
-        self.instructions_frame = InstructionsFrame(self.tab_instructions, self)
-        self.instructions_frame.pack(fill="both", expand=True)
-    
-    def show_status(self, message: str, msg_type: str = "info"):
-        """显示状态信息"""
-        color_map = {
-            "success": "green",
-            "error": "red",
-            "info": "gray",
-            "warning": "#FFD700"
-        }
-        color = color_map.get(msg_type, "gray")
-        self.status_label.configure(text=message, text_color=color)
-    
-    def _save_app_settings(self):
-        """保存程序设置"""
-        settings = {
-            "brand": self.brand,
-            "auto_save": self.auto_save_var.get(),
-            "sync_enabled": self.sync_enabled_var.get()
-        }
-        save_app_settings(settings)
-    
-    def _on_auto_save_changed(self):
-        """自动保存开关变化时"""
-        self._save_app_settings()
-    
-    def _on_sync_enabled_changed(self):
-        """同步修改开关变化时"""
-        if self.sync_enabled_var.get():
-            target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
-            warning_msg = (
-                f"⚠️ 提示 ⚠️\n\n"
-                f"开启同步修改后，所有配置变更将同时写入 {self.brand} 和 {target_brand}！\n\n"
-                f"这包括：\n"
-                f"• Provider 配置\n"
-                f"• MCP 服务器配置\n"
-                f"• 上下文压缩配置\n"
-                f"• API 密钥\n"
-                f"• 全局提示词 (AGENTS.md)\n\n"
-                f"点击「是」将立即执行一次同步覆盖，确保两边配置一致。\n\n"
-                f"确定要继续吗？"
-            )
-            if not messagebox.askyesno("确认开启同步", warning_msg):
-                self.sync_enabled_var.set(False)
-                return
-            # 立即执行一次同步
-            self._do_sync_to_other_brand()
-        self._save_app_settings()
-    
-    def schedule_auto_save(self, delay_ms: int = 1000):
-        """调度自动保存（防抖）"""
-        if not self.auto_save_var.get():
-            return
-        
-        # 取消之前的定时任务
-        if self._auto_save_job is not None:
-            self.after_cancel(self._auto_save_job)
-        
-        # 设置新的定时任务
-        self._auto_save_job = self.after(delay_ms, self._do_auto_save)
-    
-    def _do_auto_save(self):
-        """执行自动保存"""
-        self._auto_save_job = None
-        try:
-            self._save_config(silent=True)
-        except Exception as e:
-            print(f"自动保存失败: {e}")
-    
-    def _start_config_watch(self):
-        """启动配置变更轮询（每 2 秒检查一次）"""
-        self._config_hash = self._get_config_hash()
-        self._check_config_changes()
-    
-    def _get_config_hash(self) -> str:
-        """获取当前配置的哈希值（用于变更检测）"""
-        import hashlib
-        try:
-            # 获取 Provider 配置
-            providers = self.provider_frame.get_providers()
-            # 获取 MCP 和 compaction 配置
-            mcp = self.mcp_compaction_frame.get_mcp()
-            compaction = self.mcp_compaction_frame.get_compaction()
-            # 组合并计算哈希
-            snapshot = json.dumps({"p": providers, "m": mcp, "c": compaction}, sort_keys=True)
-            return hashlib.md5(snapshot.encode()).hexdigest()
+            with open(self.config_path, "rb") as f:
+                return hashlib.md5(f.read()).hexdigest()
         except Exception:
             return ""
-    
-    def _check_config_changes(self):
-        """定时检查配置是否有变化"""
-        # 未启用自动保存时，继续轮询但不执行保存
-        if self.auto_save_var.get():
-            new_hash = self._get_config_hash()
-            if new_hash and new_hash != self._config_hash:
-                self._config_hash = new_hash
-                self._do_auto_save()
-        # 每 1 秒检查一次
-        self._config_check_job = self.after(1000, self._check_config_changes)
-    
-    def _open_config_file(self):
-        """打开配置文件"""
-        if not self.config_path.exists():
-            self.show_status("配置文件不存在", "error")
-            return
-        
-        system = platform.system()
+
+    @staticmethod
+    def open_path_in_system(path: Path):
+        """跨平台在系统资源管理器中打开文件或目录。"""
         try:
-            if system == "Windows":
-                os.startfile(self.config_path)
-            elif system == "Darwin":
-                os.system(f'open "{self.config_path}"')
+            if platform.system() == "Windows":
+                os.startfile(str(path))
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", str(path)])
             else:
-                os.system(f'xdg-open "{self.config_path}"')
+                subprocess.run(["xdg-open", str(path)])
         except Exception as e:
-            self.show_status(f"打开文件失败: {str(e)}", "error")
-    
-    def _load_config(self, silent=True):
-        """加载配置文件"""
-        try:
-            if self.config_path.exists():
-                with open(self.config_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    self.config = parse_jsonc(content)
-            else:
-                self.config = {"$schema": _default_schema_url(self.brand)}
-            
-            # 加载 Provider 配置
-            providers = self.config.get("provider", {})
-            
-            # 从 auth.json 加载 API Key
-            auth_data = load_auth_json(self.brand)
-            for name, provider in providers.items():
-                if name in auth_data and "key" in auth_data[name]:
-                    provider.setdefault("options", {})["apiKey"] = auth_data[name]["key"]
-            
-            self.provider_frame.load_providers(providers)
-            
-            # 加载压缩配置
-            compaction = self.config.get("compaction", {})
-            self.mcp_compaction_frame.load_compaction(compaction)
-            
-            # 加载 MCP 配置
-            mcp = self.config.get("mcp", {})
-            self.mcp_compaction_frame.load_mcp(mcp)
-            
-            # 默认选中第一个 provider
-            if providers:
-                first_name = next(iter(providers))
-                self.provider_frame._select_provider(first_name)
-            
-            if not silent:
-                self.show_status("配置已加载", "success")
-            
-        except json.JSONDecodeError as e:
-            self.show_status(f"配置文件格式错误: {str(e)}", "error")
-            print(f"JSON 解析错误: {e}")  # 调试用
-        except Exception as e:
-            self.show_status(f"加载配置失败: {str(e)}", "error")
-            print(f"加载错误: {e}")  # 调试用
-    
-    def _save_config(self, silent: bool = False):
-        """保存配置文件（精准编辑，不覆盖其他配置）"""
-        try:
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 收集 Provider 配置
-            providers = self.provider_frame.get_providers()
-            
-            # 加载现有配置（保留所有其他字段）
-            existing_config = {}
-            if self.config_path.exists():
-                try:
-                    with open(self.config_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                        existing_config = parse_jsonc(content)
-                except:
-                    pass
-            
-            # 确保 $schema 存在
-            if "$schema" not in existing_config:
-                existing_config["$schema"] = _default_schema_url(self.brand)
-            
-            # 加载现有 auth.json
-            auth_data = load_auth_json(self.brand)
-            
-            # 获取我们管理的 provider 名称列表
-            managed_provider_names = set(providers.keys()) if providers else set()
-            
-            # 更新 provider 配置（只更新我们管理的 provider）
-            if providers:
-                # 获取现有的 provider 配置（保留用户手动添加的）
-                existing_providers = existing_config.get("provider", {})
-                
-                for name, provider in providers.items():
-                    api_key = provider["options"].get("apiKey", "")
-                    
-                    # 写入 auth.json
-                    if api_key:
-                        auth_data[name] = {
-                            "type": "api",
-                            "key": api_key
-                        }
-                    
-                    # 获取现有的 provider 配置（保留其他字段如 name、env 等）
-                    existing_provider = existing_providers.get(name, {})
-                    
-                    # 写入 npm 字段
-                    if "npm" in provider:
-                        existing_provider["npm"] = provider["npm"]
-                    
-                    # 写入 name 字段
-                    if "name" in provider:
-                        existing_provider["name"] = provider["name"]
-                    
-                    # 更新 options（只更新 baseURL，保留其他 options）
-                    existing_options = existing_provider.get("options", {})
-                    protocol = protocol_for_npm(provider.get("npm", ""))
-                    existing_options["baseURL"] = ensure_protocol_endpoint(
-                        provider["options"]["baseURL"], protocol
-                    )
-                    existing_provider["options"] = existing_options
-                    
-                    # 更新 models
-                    existing_models = existing_provider.get("models", {})
-                    
-                    # 收集 UI 中的模型 ID（用于删除不在列表中的模型）
-                    ui_model_ids = set(provider.get("models", {}).keys())
-                    
-                    for model_id, model_data in provider.get("models", {}).items():
-                        # 获取现有的 model 配置（保留其他字段）
-                        existing_model = existing_models.get(model_id, {})
-                        
-                        if "limit" in model_data:
-                            existing_model["limit"] = model_data["limit"]
-                        
-                        if "modalities" in model_data:
-                            existing_model["modalities"] = model_data["modalities"]
-                        
-                        options = model_data.get("options", {})
-                        if options:
-                            existing_model["options"] = options
-                        
-                        # 保存 variants（如果有）
-                        variants = model_data.get("variants", {})
-                        if variants:
-                            existing_model["variants"] = variants
-                        
-                        existing_models[model_id] = existing_model
-                    
-                    # 删除 UI 中已不存在的模型
-                    for model_id in list(existing_models.keys()):
-                        if model_id not in ui_model_ids:
-                            del existing_models[model_id]
-                    
-                    existing_provider["models"] = existing_models
-                    existing_providers[name] = existing_provider
-                
-                # 删除不在管理列表中的 provider
-                providers_to_delete = [name for name in existing_providers if name not in providers]
-                for name in providers_to_delete:
-                    del existing_providers[name]
-                
-                existing_config["provider"] = existing_providers
-            # 注意：如果 providers 为空，不删除 existing_config["provider"]
-            # 因为用户可能有其他手动添加的 provider
-            
-            # 更新 compaction 配置
-            compaction_config = self.mcp_compaction_frame.get_compaction()
-            if compaction_config:
-                existing_config["compaction"] = compaction_config
-            
-            # 更新 MCP 配置
-            mcp_config = self.mcp_compaction_frame.get_mcp()
-            if mcp_config:
-                existing_config["mcp"] = mcp_config
-            # 注意：如果 compaction_config 为空，不删除 existing_config["compaction"]
-            
-            # 保存文件
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(existing_config, f, indent=2, ensure_ascii=False)
-            
-            # 保存 auth.json
-            save_auth_json(auth_data, self.brand)
-            
-            # 更新内存中的配置
-            self.config = existing_config
-            
-            # 更新配置哈希（避免重复触发自动保存）
-            self._config_hash = self._get_config_hash()
-            
-            # 如果启用了同步修改，同步到另一个品牌
-            if self.sync_enabled_var.get():
-                self._sync_config_to_other_brand(existing_config, auth_data)
-            
-            if not silent:
-                if self.brand == "KiloCode":
-                    self.show_status("配置已保存 | 请按 Ctrl+Shift+P 输入 Reload Window 执行 Developer: Reload Window", "warning")
-                else:
-                    self.show_status("配置已保存 | 请重启 OpenCode 或在 TUI 中输入 /reload 使配置生效", "warning")
-            
-        except Exception as e:
-            self.show_status(f"保存配置失败: {str(e)}", "error")
+            print(f"打开系统路径失败: {e}")
 
-    def _sync_config_to_other_brand(self, config: Dict, auth_data: Dict):
-        """内部同步方法（精准合并，保留目标品牌不支持编辑的字段）"""
-        try:
-            target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
-            target_config_path = _brand_config_path(target_brand)
-            target_auth_path = _brand_auth_json_path(target_brand)
-            target_agents_path = _brand_agents_md_path(target_brand)
-            
-            # 确保目标目录存在
-            target_config_path.parent.mkdir(parents=True, exist_ok=True)
-            target_auth_path.parent.mkdir(parents=True, exist_ok=True)
-            target_agents_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 读取目标配置（如果存在）
-            target_config = {}
-            if target_config_path.exists():
-                try:
-                    with open(target_config_path, "r", encoding="utf-8") as f:
-                        target_config = parse_jsonc(f.read())
-                except:
-                    pass
-            
-            # 保留目标品牌的 $schema
-            target_config["$schema"] = _default_schema_url(target_brand)
-            
-            # 精准合并 provider 配置（保留目标品牌不支持编辑的字段）
-            if "provider" in config:
-                source_providers = config["provider"]
-                target_providers = target_config.get("provider", {})
-                
-                for name, source_provider in source_providers.items():
-                    if name in target_providers:
-                        # 已存在：精准合并，保留目标品牌的其他字段
-                        target_provider = target_providers[name]
-                        
-                        # 更新 name
-                        if "name" in source_provider:
-                            target_provider["name"] = source_provider["name"]
-                        
-                        # 更新 options（只更新 baseURL，保留其他 options）
-                        if "options" in source_provider:
-                            target_options = target_provider.get("options", {})
-                            target_options["baseURL"] = source_provider["options"].get("baseURL", "")
-                            target_provider["options"] = target_options
-                        
-                        # 精准合并 models
-                        if "models" in source_provider:
-                            source_models = source_provider["models"]
-                            target_models = target_provider.get("models", {})
-                            
-                            for model_id, source_model in source_models.items():
-                                target_model = target_models.get(model_id, {})
-                                
-                                # 更新支持的字段
-                                if "name" in source_model:
-                                    target_model["name"] = source_model["name"]
-                                if "limit" in source_model:
-                                    target_model["limit"] = source_model["limit"]
-                                if "modalities" in source_model:
-                                    target_model["modalities"] = source_model["modalities"]
-                                if "options" in source_model:
-                                    target_model["options"] = source_model["options"]
-                                if "variants" in source_model:
-                                    target_model["variants"] = source_model["variants"]
-                                
-                                target_models[model_id] = target_model
-                            
-                            # 删除源配置中不存在的模型
-                            for model_id in list(target_models.keys()):
-                                if model_id not in source_models:
-                                    del target_models[model_id]
-                            
-                            target_provider["models"] = target_models
-                        
-                        target_providers[name] = target_provider
-                    else:
-                        # 不存在：直接添加
-                        target_providers[name] = source_provider
-                
-                # 删除源配置中不存在的 provider
-                for name in list(target_providers.keys()):
-                    if name not in source_providers:
-                        del target_providers[name]
-                
-                target_config["provider"] = target_providers
-            
-            # 精准合并 MCP 配置
-            if "mcp" in config:
-                source_mcp = config["mcp"]
-                target_mcp = target_config.get("mcp", {})
-                
-                for name, source_server in source_mcp.items():
-                    if name in target_mcp:
-                        # 已存在：合并，保留目标品牌的其他字段
-                        target_server = target_mcp[name]
-                        for key in ["type", "command", "url", "enabled", "environment", "env", "headers"]:
-                            if key in source_server:
-                                target_server[key] = source_server[key]
-                        target_mcp[name] = target_server
-                    else:
-                        # 不存在：直接添加
-                        target_mcp[name] = source_server
-                
-                # 删除源配置中不存在的 MCP
-                for name in list(target_mcp.keys()):
-                    if name not in source_mcp:
-                        del target_mcp[name]
-                
-                target_config["mcp"] = target_mcp
-            
-            # 更新 compaction 配置（直接覆盖，因为这是我们完全支持的）
-            if "compaction" in config:
-                target_config["compaction"] = config["compaction"]
-            
-            # 保存目标配置
-            with open(target_config_path, "w", encoding="utf-8") as f:
-                json.dump(target_config, f, indent=2, ensure_ascii=False)
-            
-            # 同步 auth.json
-            if auth_data:
-                save_auth_json(auth_data, target_brand)
-            
-            # 同步 AGENTS.md
-            if self.agents_md_path.exists():
-                content = self.agents_md_path.read_text(encoding="utf-8")
-                target_agents_path.write_text(content, encoding="utf-8")
-            
-        except Exception as e:
-            print(f"同步到 {target_brand} 失败: {e}")
 
-    def _do_sync_to_other_brand(self):
-        """执行同步到另一个品牌（带状态提示）"""
-        try:
-            target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
-            
-            # 获取当前配置
-            current_config = self.config.copy()
-            current_auth = load_auth_json(self.brand)
-            
-            # 调用内部同步方法
-            self._sync_config_to_other_brand(current_config, current_auth)
-            
-            self.show_status(f"已同步配置到 {target_brand}", "success")
-        except Exception as e:
-            self.show_status(f"同步失败: {str(e)}", "error")
 
-    def _sync_to_other_brand(self):
-        """同步当前配置到另一个品牌（手动触发，带确认对话框）"""
-        target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
-        
-        warning_msg = (
-            f"⚠️ 警告 ⚠️\n\n"
-            f"将用当前 {self.brand} 的配置精准合并到 {target_brand} 的配置！\n\n"
-            f"这包括：\n"
-            f"• Provider 配置（精准合并，保留目标品牌特有字段）\n"
-            f"• MCP 服务器配置（精准合并）\n"
-            f"• 上下文压缩配置\n"
-            f"• API 密钥\n"
-            f"• 全局提示词 (AGENTS.md)\n\n"
-            f"目标品牌中不支持编辑的字段将被保留。\n\n"
-            f"确定要继续吗？"
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  SECTION 6: Flet 对话框组件 (Dialogs)
+# ████████████████████████████████████████████████████████████████████████████████
+
+class ModelSelectorDialog:
+    """探测模型的批量勾选添加对话框，支持实时搜索与全选/反选。"""
+
+    def __init__(
+        self,
+        page: ft.Page,
+        models: List[Dict[str, Any]],
+        existing_ids: set,
+        on_confirm: Callable[[List[Dict[str, Any]]], None],
+    ):
+        self.page = page
+        self.models = models
+        self.existing_ids = existing_ids
+        self.on_confirm = on_confirm
+
+        self.checkboxes: Dict[str, ft.Checkbox] = {}
+        self.search_field = ft.TextField(
+            hint_text="搜索模型 ID 或名称...",
+            prefix_icon=ft.Icons.SEARCH,
+            dense=True,
+            on_change=self._on_search_change,
+            expand=True,
         )
-        
-        if not messagebox.askyesno("确认同步", warning_msg):
+        self.count_text = ft.Text("已选: 0", weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_400)
+        self.list_view = ft.ListView(expand=True, spacing=4)
+
+        self._build_list()
+
+        self.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("探测到的可用模型", weight=ft.FontWeight.BOLD),
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Row([
+                            self.search_field,
+                            ft.OutlinedButton("全选", on_click=self._select_all),
+                            ft.OutlinedButton("反选", on_click=self._deselect_all),
+                        ]),
+                        ft.Container(
+                            content=self.list_view,
+                            border=ft.border.all(1, ft.Colors.OUTLINE_VARIANT),
+                            border_radius=8,
+                            padding=8,
+                            expand=True,
+                        ),
+                        ft.Row([self.count_text], alignment=ft.MainAxisAlignment.END),
+                    ],
+                    spacing=10,
+                ),
+                width=680,
+                height=450,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.close()),
+                ft.FilledButton("添加所选模型", icon=ft.Icons.CHECK, on_click=self._confirm),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+    def _build_list(self, query: str = ""):
+        self.list_view.controls.clear()
+        query = query.lower().strip()
+
+        for m in self.models:
+            mid = m["id"]
+            mname = m.get("name", mid)
+            owned = m.get("owned_by", "")
+            is_existing = mid in self.existing_ids
+
+            if query and query not in mid.lower() and query not in mname.lower():
+                continue
+
+            if mid not in self.checkboxes:
+                cb = ft.Checkbox(
+                    label=f"{mid}  ({owned})" if owned else mid,
+                    value=False,
+                    disabled=is_existing,
+                    on_change=self._on_check_changed,
+                )
+                self.checkboxes[mid] = cb
+
+            cb = self.checkboxes[mid]
+            self.list_view.controls.append(cb)
+
+    def _on_search_change(self, e):
+        self._build_list(self.search_field.value)
+        safe_update(self.list_view, self.page)
+
+    def _on_check_changed(self, e):
+        count = sum(1 for cb in self.checkboxes.values() if cb.value)
+        self.count_text.value = f"已选: {count}"
+        safe_update(self.count_text, self.page)
+
+    def _select_all(self, e):
+        for cb in self.checkboxes.values():
+            if not cb.disabled:
+                cb.value = True
+        self._on_check_changed(None)
+        safe_update(self.list_view, self.page)
+
+    def _deselect_all(self, e):
+        for cb in self.checkboxes.values():
+            if not cb.disabled:
+                cb.value = False
+        self._on_check_changed(None)
+        safe_update(self.list_view, self.page)
+
+    def _confirm(self, e):
+        selected = [m for m in self.models if self.checkboxes.get(m["id"]) and self.checkboxes[m["id"]].value]
+        self.close()
+        self.on_confirm(selected)
+
+    def open(self):
+        self.page.open(self.dialog)
+
+    def close(self):
+        self.page.close(self.dialog)
+
+
+class JsonImportDialog:
+    """原始 JSON/JSONC 批量导入对话框。"""
+
+    def __init__(self, page: ft.Page, on_confirm: Callable[[Dict], None]):
+        self.page = page
+        self.on_confirm = on_confirm
+
+        self.text_field = ft.TextField(
+            multiline=True,
+            min_lines=14,
+            max_lines=18,
+            hint_text="请在此粘贴 JSON 或带注释的 JSONC 内容...",
+            expand=True,
+        )
+
+        self.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("导入 JSON 配置", weight=ft.FontWeight.BOLD),
+            content=ft.Container(
+                content=self.text_field,
+                width=650,
+                height=380,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.close()),
+                ft.FilledButton("解析并导入", icon=ft.Icons.DOWNLOAD, on_click=self._confirm),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+    def _confirm(self, e):
+        content = self.text_field.value.strip()
+        if not content:
             return
-        
         try:
-            # 获取当前配置
-            current_config = self.config.copy()
-            current_auth = load_auth_json(self.brand)
-            
-            # 调用内部同步方法（精准合并）
-            self._sync_config_to_other_brand(current_config, current_auth)
-            
-            self.show_status(f"已同步配置到 {target_brand}", "success")
-            
-        except Exception as e:
-            self.show_status(f"同步失败: {str(e)}", "error")
-    
-    def _apply_brand(self, brand: str):
-        """切换 OpenCode / KiloCode 品牌并同步 UI + 路径 + 重载配置"""
+            data = parse_jsonc(content)
+            self.close()
+            self.on_confirm(data)
+        except Exception as err:
+            self.text_field.error_text = f"JSON 解析失败: {err}"
+            safe_update(self.text_field, self.page)
+
+    def open(self):
+        self.page.open(self.dialog)
+
+    def close(self):
+        self.page.close(self.dialog)
+
+
+class McpEditDialog:
+    """单个 MCP 服务的添加与编辑对话框（支持 Local/Remote 动态表单）。"""
+
+    def __init__(
+        self,
+        page: ft.Page,
+        name: str = "",
+        config: Optional[Dict[str, Any]] = None,
+        on_confirm: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ):
+        self.page = page
+        self.original_name = name
+        self.on_confirm = on_confirm
+        config = config or {}
+
+        mcp_type = config.get("type", "local")
+        command_list = config.get("command", [])
+        command_str = " ".join(command_list) if isinstance(command_list, list) else str(command_list or "")
+        url_str = config.get("url", "")
+        self.enabled = config.get("enabled", True)
+
+        self.name_field = ft.TextField(label="MCP 名称", value=name, dense=True)
+        self.type_dropdown = ft.Dropdown(
+            label="类型",
+            value=mcp_type,
+            options=[ft.dropdown.Option("local", "本地 (Local)"), ft.dropdown.Option("remote", "远程 (Remote)")],
+            dense=True,
+            on_change=self._on_type_change,
+        )
+        self.command_field = ft.TextField(
+            label="启动命令 (空格分隔)",
+            value=command_str,
+            hint_text="例如: npx -y @modelcontextprotocol/server-filesystem D:/",
+            dense=True,
+            visible=(mcp_type == "local"),
+        )
+        self.url_field = ft.TextField(
+            label="远程 URL",
+            value=url_str,
+            hint_text="例如: http://localhost:8000/sse",
+            dense=True,
+            visible=(mcp_type == "remote"),
+        )
+        self.enabled_switch = ft.Switch(label="启用此服务", value=self.enabled)
+
+        # 环境变量列表
+        self.env_rows: List[ft.Row] = []
+        self.env_container = ft.Column(spacing=6)
+        raw_env = config.get("environment") or config.get("env") or {}
+        for k, v in raw_env.items():
+            self._add_env_row(k, str(v))
+
+        self.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("编辑 MCP 服务器" if name else "添加 MCP 服务器", weight=ft.FontWeight.BOLD),
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        self.name_field,
+                        ft.Row([self.type_dropdown, self.enabled_switch], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                        self.command_field,
+                        self.url_field,
+                        ft.Divider(),
+                        ft.Row(
+                            [
+                                ft.Text("环境变量 (Environment)", weight=ft.FontWeight.BOLD),
+                                ft.IconButton(icon=ft.Icons.ADD_CIRCLE_OUTLINE, tooltip="添加变量", on_click=lambda e: self._add_env_row()),
+                            ],
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        ),
+                        ft.Container(
+                            content=self.env_container,
+                            height=120,
+                        ),
+                    ],
+                    scroll=ft.ScrollMode.ADAPTIVE,
+                    spacing=12,
+                ),
+                width=550,
+                height=420,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.close()),
+                ft.FilledButton("保存", icon=ft.Icons.CHECK, on_click=self._confirm),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+    def _on_type_change(self, e):
+        is_local = self.type_dropdown.value == "local"
+        self.command_field.visible = is_local
+        self.url_field.visible = not is_local
+        safe_update(self.command_field, self.page)
+        safe_update(self.url_field, self.page)
+
+    def _add_env_row(self, key: str = "", val: str = ""):
+        k_field = ft.TextField(hint_text="KEY", value=key, dense=True, expand=1)
+        v_field = ft.TextField(hint_text="VALUE", value=val, dense=True, expand=1)
+        row = ft.Row(spacing=6)
+        del_btn = ft.IconButton(
+            icon=ft.Icons.REMOVE_CIRCLE_OUTLINE,
+            icon_color=ft.Colors.RED_400,
+            on_click=lambda e: self._remove_env_row(row),
+        )
+        row.controls = [k_field, v_field, del_btn]
+        self.env_rows.append(row)
+        self.env_container.controls.append(row)
+        safe_update(self.env_container, self.page)
+
+    def _remove_env_row(self, row: ft.Row):
+        if row in self.env_rows:
+            self.env_rows.remove(row)
+            self.env_container.controls.remove(row)
+            safe_update(self.env_container, self.page)
+
+    def _confirm(self, e):
+        name = self.name_field.value.strip()
+        if not name:
+            self.name_field.error_text = "名称不能为空"
+            safe_update(self.name_field, self.page)
+            return
+
+        mcp_type = self.type_dropdown.value
+        result: Dict[str, Any] = {
+            "type": mcp_type,
+            "enabled": self.enabled_switch.value,
+        }
+
+        if mcp_type == "local":
+            cmd = self.command_field.value.strip()
+            result["command"] = cmd.split() if cmd else []
+        else:
+            result["url"] = self.url_field.value.strip()
+
+        env_dict = {}
+        for row in self.env_rows:
+            k = row.controls[0].value.strip()
+            v = row.controls[1].value.strip()
+            if k:
+                env_dict[k] = v
+        if env_dict:
+            result["environment"] = env_dict
+
+        self.close()
+        if self.on_confirm:
+            self.on_confirm(name, result)
+
+    def open(self):
+        self.page.open(self.dialog)
+
+    def close(self):
+        self.page.close(self.dialog)
+
+
+class AddVariantDialog:
+    """为模型添加推理变体的对话框。"""
+
+    def __init__(
+        self,
+        page: ft.Page,
+        protocol: str,
+        existing_variants: List[str],
+        on_confirm: Callable[[str], None],
+    ):
+        self.page = page
+        self.on_confirm = on_confirm
+
+        levels = (
+            ["low", "medium", "high"]
+            if protocol == "gemini_native"
+            else ["max", "xhigh", "high", "medium", "low", "none"]
+        )
+        available = [l for l in levels if l not in existing_variants]
+        if not available:
+            available = ["custom"]
+
+        self.dropdown = ft.Dropdown(
+            label="变体档位 (Variant Level)",
+            value=available[0],
+            options=[ft.dropdown.Option(lvl) for lvl in available],
+            dense=True,
+        )
+
+        self.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("添加变体档位", weight=ft.FontWeight.BOLD),
+            content=ft.Container(content=self.dropdown, width=320, height=80),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self.close()),
+                ft.FilledButton("添加", icon=ft.Icons.ADD, on_click=self._confirm),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+    def _confirm(self, e):
+        level = self.dropdown.value
+        self.close()
+        self.on_confirm(level)
+
+    def open(self):
+        self.page.open(self.dialog)
+
+    def close(self):
+        self.page.close(self.dialog)
+
+
+
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  SECTION 7: Flet 视图组件 (ProviderView, McpCompactionView, InstructionsView)
+# ████████████████████████████████████████████████████████████████████████████████
+
+class ProviderView(ft.Container):
+    """Provider 与模型管理视图：包含左侧 Provider 列表与右侧端点、密钥及模型卡片明细。"""
+
+    def __init__(self, page: ft.Page, on_change: Optional[Callable[[], None]] = None):
+        super().__init__(expand=True)
+        self.page = page
+        self.on_change_callback = on_change
+        self.providers_data: Dict[str, Any] = {}
+        self.current_provider_name: Optional[str] = None
+
+        self._build_ui()
+
+    def _build_ui(self):
+        # 左侧列表
+        self.provider_list_col = ft.ListView(expand=True, spacing=6)
+        self.left_panel = ft.Container(
+            width=280,
+            border=ft.border.only(right=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
+            padding=10,
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Text("Provider 列表", weight=ft.FontWeight.BOLD, size=16),
+                            ft.IconButton(
+                                icon=ft.Icons.ADD_CIRCLE,
+                                icon_color=ft.Colors.PRIMARY,
+                                tooltip="新建 Provider",
+                                on_click=self._on_add_provider_click,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    ft.Divider(height=1),
+                    self.provider_list_col,
+                ],
+                expand=True,
+            ),
+        )
+
+        # 右侧基本设置
+        self.name_field = ft.TextField(label="Provider 名称", dense=True, expand=True, on_change=self._on_field_change)
+        self.protocol_dropdown = ft.Dropdown(
+            label="协议",
+            dense=True,
+            expand=True,
+            options=[
+                ft.dropdown.Option("openai_standard", "OpenAI Compatible"),
+                ft.dropdown.Option("openai_response", "OpenAI Responses"),
+                ft.dropdown.Option("gemini_native", "Gemini Native"),
+                ft.dropdown.Option("grok_native", "Grok Native"),
+            ],
+            on_change=self._on_protocol_change,
+        )
+        self.base_url_field = ft.TextField(
+            label="Base URL",
+            dense=True,
+            expand=True,
+            on_change=self._on_field_change,
+            on_blur=self._on_base_url_blur,
+        )
+        self.api_key_field = ft.TextField(
+            label="API Key",
+            dense=True,
+            password=True,
+            can_reveal_password=True,
+            expand=True,
+            on_change=self._on_field_change,
+        )
+
+        self.btn_probe = ft.FilledButton("探测可用模型", icon=ft.Icons.TRAVEL_EXPLORE, on_click=self._on_probe_models)
+        self.btn_add_model = ft.OutlinedButton("手动添加模型", icon=ft.Icons.ADD, on_click=self._on_add_model_manual)
+        self.btn_test_provider = ft.OutlinedButton("测试当前配置", icon=ft.Icons.NETWORK_CHECK, on_click=self._on_test_provider)
+
+        self.models_list_col = ft.ListView(expand=True, spacing=10)
+
+        self.right_panel = ft.Container(
+            expand=True,
+            padding=14,
+            content=ft.Column(
+                [
+                    ft.Card(
+                        content=ft.Container(
+                            padding=14,
+                            content=ft.Column(
+                                [
+                                    ft.Row([self.name_field, self.protocol_dropdown], spacing=12),
+                                    ft.Row([self.base_url_field, self.api_key_field], spacing=12),
+                                    ft.Row([self.btn_probe, self.btn_add_model, self.btn_test_provider], spacing=10),
+                                ],
+                                spacing=10,
+                            ),
+                        ),
+                    ),
+                    ft.Row(
+                        [
+                            ft.Text("已配置模型列表", weight=ft.FontWeight.BOLD, size=15),
+                            ft.Text("支持调整上下文限额、开启图像识别及推理变体开关", size=12, color=ft.Colors.GREY_400),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    self.models_list_col,
+                ],
+                expand=True,
+                spacing=10,
+            ),
+        )
+
+        self.content = ft.Row([self.left_panel, self.right_panel], expand=True, spacing=0)
+
+    # ---------------- 业务方法 ----------------
+
+    def load_providers(self, providers: Dict[str, Any]):
+        self.providers_data = providers
+        self._refresh_provider_list()
+        if providers:
+            first_name = next(iter(providers))
+            self.select_provider(first_name)
+        else:
+            self.current_provider_name = None
+            self._clear_details()
+
+    def get_providers(self) -> Dict[str, Any]:
+        self._sync_ui_to_current_provider()
+        return self.providers_data
+
+    def _refresh_provider_list(self):
+        self.provider_list_col.controls.clear()
+        for name, p_data in self.providers_data.items():
+            is_selected = (name == self.current_provider_name)
+            tile = ft.Container(
+                content=ft.Row(
+                    [
+                        ft.Icon(
+                            ft.Icons.STORAGE,
+                            color=ft.Colors.PRIMARY if is_selected else ft.Colors.GREY_500,
+                            size=20,
+                        ),
+                        ft.Text(
+                            name,
+                            weight=ft.FontWeight.BOLD if is_selected else ft.FontWeight.NORMAL,
+                            color=ft.Colors.PRIMARY if is_selected else None,
+                            expand=True,
+                        ),
+                        ft.IconButton(
+                            icon=ft.Icons.DELETE_OUTLINE,
+                            icon_size=18,
+                            tooltip="删除 Provider",
+                            on_click=lambda e, n=name: self._remove_provider(n),
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                padding=8,
+                border_radius=8,
+                bgcolor=ft.Colors.SECONDARY_CONTAINER if is_selected else ft.Colors.SURFACE_CONTAINER_HIGHEST,
+                on_click=lambda e, n=name: self.select_provider(n),
+            )
+            self.provider_list_col.controls.append(tile)
+        safe_update(self.provider_list_col, self.page)
+
+    def select_provider(self, name: str):
+        if self.current_provider_name:
+            self._sync_ui_to_current_provider()
+
+        self.current_provider_name = name
+        p_data = self.providers_data.get(name, {})
+
+        self.name_field.value = name
+        self.name_field.disabled = False
+        npm = p_data.get("npm", "@ai-sdk/openai-compatible")
+        self.protocol_dropdown.value = protocol_for_npm(npm)
+        self.protocol_dropdown.disabled = False
+
+        options = p_data.get("options", {})
+        self.base_url_field.value = options.get("baseURL", "")
+        self.base_url_field.disabled = False
+        self.api_key_field.value = options.get("apiKey", "")
+        self.api_key_field.disabled = False
+
+        self._refresh_provider_list()
+        self._refresh_models_list()
+        safe_update(self.right_panel, self.page)
+
+    def _sync_ui_to_current_provider(self):
+        if not self.current_provider_name or self.current_provider_name not in self.providers_data:
+            return
+        p_data = self.providers_data[self.current_provider_name]
+        new_name = self.name_field.value.strip()
+
+        p_data["npm"] = npm_for_protocol(self.protocol_dropdown.value)
+        p_data.setdefault("options", {})["baseURL"] = self.base_url_field.value.strip()
+        p_data["options"]["apiKey"] = self.api_key_field.value.strip()
+
+        # 处理重命名
+        if new_name and new_name != self.current_provider_name:
+            self.providers_data[new_name] = self.providers_data.pop(self.current_provider_name)
+            self.current_provider_name = new_name
+            self._refresh_provider_list()
+
+    def _clear_details(self):
+        self.name_field.value = ""
+        self.name_field.disabled = True
+        self.base_url_field.value = ""
+        self.base_url_field.disabled = True
+        self.api_key_field.value = ""
+        self.api_key_field.disabled = True
+        self.protocol_dropdown.disabled = True
+        self.models_list_col.controls.clear()
+        safe_update(self.right_panel, self.page)
+
+    def _on_add_provider_click(self, e):
+        idx = 1
+        base_name = "New Provider"
+        name = base_name
+        while name in self.providers_data:
+            idx += 1
+            name = f"{base_name} {idx}"
+
+        self.providers_data[name] = {
+            "name": name,
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": "https://api.openai.com/v1", "apiKey": ""},
+            "models": {},
+        }
+        self.select_provider(name)
+        self._notify_change()
+
+    def _remove_provider(self, name: str):
+        if name in self.providers_data:
+            del self.providers_data[name]
+            if self.current_provider_name == name:
+                self.current_provider_name = next(iter(self.providers_data)) if self.providers_data else None
+                if self.current_provider_name:
+                    self.select_provider(self.current_provider_name)
+                else:
+                    self._clear_details()
+                    self._refresh_provider_list()
+            else:
+                self._refresh_provider_list()
+            self._notify_change()
+
+    def _on_protocol_change(self, e):
+        if self.current_provider_name:
+            protocol = self.protocol_dropdown.value
+            current_url = self.base_url_field.value.strip()
+            if current_url:
+                self.base_url_field.value = ensure_protocol_endpoint(current_url, protocol)
+                safe_update(self.base_url_field, self.page)
+            self._sync_ui_to_current_provider()
+            self._notify_change()
+
+    def _on_base_url_blur(self, e):
+        if self.current_provider_name:
+            protocol = self.protocol_dropdown.value
+            url = self.base_url_field.value.strip()
+            if url:
+                formatted = ensure_protocol_endpoint(url, protocol)
+                if formatted != url:
+                    self.base_url_field.value = formatted
+                    safe_update(self.base_url_field, self.page)
+            self._sync_ui_to_current_provider()
+
+    def _on_field_change(self, e):
+        self._notify_change()
+
+    def _notify_change(self):
+        if self.on_change_callback:
+            self.on_change_callback()
+
+    # ---------------- 模型列表与操作 ----------------
+
+    def _refresh_models_list(self):
+        self.models_list_col.controls.clear()
+        if not self.current_provider_name or self.current_provider_name not in self.providers_data:
+            return
+
+        p_data = self.providers_data[self.current_provider_name]
+        models = p_data.get("models", {})
+        protocol = self.protocol_dropdown.value or "openai_standard"
+
+        for model_id, model_data in models.items():
+            card = self._create_model_card(model_id, model_data, protocol)
+            self.models_list_col.controls.append(card)
+
+        safe_update(self.models_list_col, self.page)
+
+    def _create_model_card(self, model_id: str, model_data: Dict[str, Any], protocol: str) -> ft.Card:
+        limit = model_data.get("limit", {})
+        context_k = _to_k_display(limit.get("context", 128000))
+        output_k = _to_k_display(limit.get("output", 4096))
+        has_image = "image" in model_data.get("modalities", {}).get("input", ["text"])
+
+        variants = model_data.get("variants")
+        variants_enabled = variants is not None
+
+        # 输入控件
+        context_field = ft.TextField(
+            label="Context(K)",
+            value=context_k,
+            width=110,
+            dense=True,
+            on_change=lambda e, mid=model_id: self._update_model_limit(mid, "context", e.control.value),
+        )
+        output_field = ft.TextField(
+            label="Output(K)",
+            value=output_k,
+            width=110,
+            dense=True,
+            on_change=lambda e, mid=model_id: self._update_model_limit(mid, "output", e.control.value),
+        )
+        image_switch = ft.Switch(
+            label="图像",
+            value=has_image,
+            on_change=lambda e, mid=model_id: self._update_model_image(mid, e.control.value),
+        )
+
+        # 变体标签组
+        variant_chips_row = ft.Row(spacing=4, wrap=True, expand=True)
+
+        def build_chips():
+            variant_chips_row.controls.clear()
+            if variants:
+                for lvl in variants.keys():
+                    chip = ft.Chip(
+                        label=ft.Text(lvl),
+                        on_delete=lambda e, l=lvl, mid=model_id: self._remove_variant(mid, l),
+                    )
+                    variant_chips_row.controls.append(chip)
+
+        build_chips()
+
+        btn_add_variant = ft.TextButton(
+            "+ 添加变体",
+            visible=variants_enabled,
+            on_click=lambda e, mid=model_id: self._open_add_variant_dialog(mid, protocol),
+        )
+
+        variants_toggle_btn = ft.IconButton(
+            icon=ft.Icons.CHECK_CIRCLE if variants_enabled else ft.Icons.BLOCK,
+            icon_color=ft.Colors.GREEN_400 if variants_enabled else ft.Colors.RED_400,
+            tooltip="点击禁用变体(保存时不写入 variants)" if variants_enabled else "点击启用变体",
+            on_click=lambda e, mid=model_id: self._toggle_variants(mid, protocol),
+        )
+
+        card = ft.Card(
+            content=ft.Container(
+                padding=12,
+                content=ft.Column(
+                    [
+                        # 第一行：模型基本信息与测试按钮
+                        ft.Row(
+                            [
+                                ft.Row(
+                                    [
+                                        ft.Icon(ft.Icons.AUTO_AWESOME, size=18, color=ft.Colors.AMBER_400),
+                                        ft.Text(model_id, weight=ft.FontWeight.BOLD, size=14),
+                                    ],
+                                    spacing=6,
+                                ),
+                                ft.Row(
+                                    [
+                                        context_field,
+                                        output_field,
+                                        image_switch,
+                                        ft.IconButton(
+                                            icon=ft.Icons.PLAY_ARROW,
+                                            tooltip="连通性测试 (发送 'Hi')",
+                                            on_click=lambda e, mid=model_id: self._test_model(mid),
+                                        ),
+                                        ft.IconButton(
+                                            icon=ft.Icons.SPEED,
+                                            tooltip="流式测速",
+                                            on_click=lambda e, mid=model_id: self._test_speed(mid),
+                                        ),
+                                        ft.IconButton(
+                                            icon=ft.Icons.DELETE_OUTLINE,
+                                            tooltip="删除模型",
+                                            on_click=lambda e, mid=model_id: self._remove_model(mid),
+                                        ),
+                                    ],
+                                    spacing=6,
+                                ),
+                            ],
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        ),
+                        # 第二行：推理变体设置
+                        ft.Row(
+                            [
+                                ft.Row(
+                                    [
+                                        variants_toggle_btn,
+                                        ft.Text("推理变体: " + ("已开启" if variants_enabled else "已禁用"), size=12),
+                                    ],
+                                    spacing=4,
+                                ),
+                                variant_chips_row,
+                                btn_add_variant,
+                            ],
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        ),
+                    ],
+                    spacing=6,
+                ),
+            ),
+        )
+        return card
+
+    def _update_model_limit(self, model_id: str, field: str, value_str: str):
+        p_data = self.providers_data.get(self.current_provider_name, {})
+        model = p_data.get("models", {}).get(model_id)
+        if model:
+            val = _parse_k_display(value_str, 128 if field == "context" else 4)
+            model.setdefault("limit", {})[field] = val
+            self._notify_change()
+
+    def _update_model_image(self, model_id: str, enabled: bool):
+        p_data = self.providers_data.get(self.current_provider_name, {})
+        model = p_data.get("models", {}).get(model_id)
+        if model:
+            model.setdefault("modalities", {})["input"] = ["text", "image"] if enabled else ["text"]
+            self._notify_change()
+
+    def _toggle_variants(self, model_id: str, protocol: str):
+        p_data = self.providers_data.get(self.current_provider_name, {})
+        model = p_data.get("models", {}).get(model_id)
+        if not model:
+            return
+
+        if model.get("variants") is not None:
+            model["variants"] = None
+        else:
+            model["variants"] = default_model_variants(protocol, model_id)
+
+        self._refresh_models_list()
+        self._notify_change()
+
+    def _remove_variant(self, model_id: str, level: str):
+        p_data = self.providers_data.get(self.current_provider_name, {})
+        model = p_data.get("models", {}).get(model_id)
+        if model and model.get("variants") and level in model["variants"]:
+            del model["variants"][level]
+            self._refresh_models_list()
+            self._notify_change()
+
+    def _open_add_variant_dialog(self, model_id: str, protocol: str):
+        p_data = self.providers_data.get(self.current_provider_name, {})
+        model = p_data.get("models", {}).get(model_id, {})
+        existing = list(model.get("variants", {}).keys())
+
+        def on_add(level: str):
+            tf = thinking_field_for_model(protocol, model_id)
+            model.setdefault("variants", {})[level] = build_variant_option(protocol, model_id, level, tf)
+            self._refresh_models_list()
+            self._notify_change()
+
+        dlg = AddVariantDialog(self.page, protocol, existing, on_add)
+        dlg.open()
+
+    def _remove_model(self, model_id: str):
+        p_data = self.providers_data.get(self.current_provider_name, {})
+        if "models" in p_data and model_id in p_data["models"]:
+            del p_data["models"][model_id]
+            self._refresh_models_list()
+            self._notify_change()
+
+    def _on_add_model_manual(self, e):
+        if not self.current_provider_name:
+            return
+
+        model_id_field = ft.TextField(label="模型 ID", hint_text="例如: gpt-4o 或 claude-3-5-sonnet")
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("手动添加模型", weight=ft.FontWeight.BOLD),
+            content=ft.Container(content=model_id_field, width=380, height=80),
+            actions=[
+                ft.TextButton("取消", on_click=lambda ev: self.page.close(dlg)),
+                ft.FilledButton(
+                    "添加",
+                    on_click=lambda ev: self._confirm_add_model_manual(model_id_field.value.strip(), dlg),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dlg)
+
+    def _confirm_add_model_manual(self, model_id: str, dlg: ft.AlertDialog):
+        self.page.close(dlg)
+        if not model_id or not self.current_provider_name:
+            return
+
+        p_data = self.providers_data[self.current_provider_name]
+        protocol = self.protocol_dropdown.value
+        p_data.setdefault("models", {})[model_id] = {
+            "limit": {"context": 128000, "output": 4096},
+            "modalities": {"input": ["text", "image"]},
+            "variants": default_model_variants(protocol, model_id),
+        }
+        self._refresh_models_list()
+        self._notify_change()
+
+    def _on_probe_models(self, e):
+        if not self.current_provider_name:
+            return
+
+        base_url = self.base_url_field.value.strip()
+        api_key = self.api_key_field.value.strip()
+        protocol = self.protocol_dropdown.value
+
+        if not base_url:
+            self._show_snack("请先填写 Base URL", ft.Colors.ORANGE_400)
+            return
+
+        self._show_snack("正在探测模型列表...", ft.Colors.BLUE_400)
+
+        def run_probe():
+            try:
+                models = probe_models(base_url, api_key, protocol)
+                if not models:
+                    self._show_snack("未能探测到任何可用模型", ft.Colors.AMBER_400)
+                    return
+
+                p_data = self.providers_data[self.current_provider_name]
+                existing_ids = set(p_data.get("models", {}).keys())
+
+                def on_confirm(selected_models: List[Dict[str, Any]]):
+                    for m in selected_models:
+                        mid = m["id"]
+                        p_data.setdefault("models", {})[mid] = {
+                            "limit": {"context": 128000, "output": 4096},
+                            "modalities": {"input": ["text", "image"]},
+                            "variants": default_model_variants(protocol, mid),
+                        }
+                    self._refresh_models_list()
+                    self._notify_change()
+                    self._show_snack(f"已成功添加 {len(selected_models)} 个模型", ft.Colors.GREEN_400)
+
+                dlg = ModelSelectorDialog(self.page, models, existing_ids, on_confirm)
+                dlg.open()
+            except Exception as err:
+                self._show_snack(f"探测失败: {err}", ft.Colors.RED_400)
+
+        threading.Thread(target=run_probe, daemon=True).start()
+
+    def _on_test_provider(self, e):
+        """测试当前 Provider 的连通性。"""
+        if not self.current_provider_name:
+            return
+        p_data = self.providers_data[self.current_provider_name]
+        models = list(p_data.get("models", {}).keys())
+        if not models:
+            self._show_snack("当前 Provider 尚未配置任何模型，无法测试", ft.Colors.ORANGE_400)
+            return
+        self._test_model(models[0])
+
+    def _test_model(self, model_id: str):
+        base_url = self.base_url_field.value.strip()
+        api_key = self.api_key_field.value.strip()
+        protocol = self.protocol_dropdown.value
+
+        self._show_snack(f"正在测试模型 {model_id}...", ft.Colors.BLUE_400)
+
+        def run_test():
+            req = build_model_test_request(base_url, api_key, protocol, model_id, "Hi", 16, stream=False)
+            start_t = time.time()
+            try:
+                resp = requests.post(
+                    req["url"],
+                    headers=req["headers"],
+                    json=req["payload"],
+                    params=req["params"],
+                    timeout=15,
+                )
+                cost = (time.time() - start_t) * 1000
+                if resp.status_code == 200:
+                    self._show_snack(f"连通成功! 响应时间: {cost:.0f}ms", ft.Colors.GREEN_400)
+                else:
+                    self._show_snack(f"测试失败 [{resp.status_code}]: {resp.text[:100]}", ft.Colors.RED_400)
+            except Exception as err:
+                self._show_snack(f"连通异常: {err}", ft.Colors.RED_400)
+
+        threading.Thread(target=run_test, daemon=True).start()
+
+    def _test_speed(self, model_id: str):
+        base_url = self.base_url_field.value.strip()
+        api_key = self.api_key_field.value.strip()
+        protocol = self.protocol_dropdown.value
+
+        self._show_snack(f"正在对 {model_id} 进行流式测速...", ft.Colors.BLUE_400)
+
+        def run_speed():
+            req = build_model_test_request(
+                base_url,
+                api_key,
+                protocol,
+                model_id,
+                "以'人工智能'为主题写一段50字的简介。",
+                128,
+                stream=True,
+            )
+            try:
+                start_t = time.time()
+                resp = requests.post(
+                    req["url"],
+                    headers=req["headers"],
+                    json=req["payload"],
+                    params=req["params"],
+                    stream=True,
+                    timeout=20,
+                )
+                if resp.status_code != 200:
+                    self._show_snack(f"测速请求失败: HTTP {resp.status_code}", ft.Colors.RED_400)
+                    return
+
+                first_token_t = None
+                total_chars = 0
+                for line in resp.iter_lines():
+                    if line:
+                        decoded = line.decode("utf-8")
+                        if decoded.startswith("data: "):
+                            raw_data = decoded[6:].strip()
+                            if raw_data == "[DONE]":
+                                break
+                            try:
+                                json_chunk = json.loads(raw_data)
+                                text = extract_stream_text(json_chunk, protocol)
+                                if text:
+                                    if first_token_t is None:
+                                        first_token_t = time.time()
+                                    total_chars += len(text)
+                            except Exception:
+                                pass
+
+                end_t = time.time()
+                ttft = ((first_token_t or end_t) - start_t) * 1000
+                duration = end_t - (first_token_t or start_t)
+                speed = (total_chars / duration) if duration > 0 else 0
+                self._show_snack(
+                    f"首字延迟(TTFT): {ttft:.0f}ms | 生成速度: {speed:.1f} 字/秒",
+                    ft.Colors.GREEN_400,
+                )
+            except Exception as err:
+                self._show_snack(f"测速失败: {err}", ft.Colors.RED_400)
+
+        threading.Thread(target=run_speed, daemon=True).start()
+
+    def _show_snack(self, message: str, color: str = ft.Colors.GREEN_400):
+        if self.page:
+            sb = ft.SnackBar(content=ft.Text(message), bgcolor=color, duration=4000)
+            self.page.open(sb)
+
+
+class McpCompactionView(ft.Container):
+    """MCP 服务器与上下文压缩管理视图。"""
+
+    def __init__(self, page: ft.Page, on_change: Optional[Callable[[], None]] = None):
+        super().__init__(expand=True)
+        self.page = page
+        self.on_change_callback = on_change
+
+        self.mcp_data: Dict[str, Any] = {}
+        self.compaction_data: Dict[str, Any] = {}
+
+        self._build_ui()
+
+    def _build_ui(self):
+        self.mcp_list_col = ft.ListView(expand=True, spacing=8)
+
+        self.switch_auto_compact = ft.Switch(
+            label="自动压缩上下文 (autoCompact)",
+            on_change=lambda e: self._on_compaction_change(),
+        )
+        self.switch_prune_output = ft.Switch(
+            label="清理旧输出 (prunePreviousOutput)",
+            on_change=lambda e: self._on_compaction_change(),
+        )
+        self.buffer_field = ft.TextField(
+            label="缓冲区大小 (compactionBuffer，单位：K)",
+            dense=True,
+            width=280,
+            on_change=lambda e: self._on_compaction_change(),
+        )
+
+        self.content = ft.Container(
+            content=ft.Column(
+                [
+                    # 上部分：MCP 服务器管理
+                    ft.Row(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Icon(ft.Icons.EXTENSION, color=ft.Colors.PRIMARY, size=24),
+                                    ft.Text("MCP 服务器管理", weight=ft.FontWeight.BOLD, size=18),
+                                ],
+                                spacing=8,
+                            ),
+                            ft.Row(
+                                [
+                                    ft.FilledButton("添加 MCP", icon=ft.Icons.ADD, on_click=self._on_add_mcp),
+                                    ft.OutlinedButton("导入 JSON", icon=ft.Icons.FILE_DOWNLOAD, on_click=self._on_import_json),
+                                ],
+                                spacing=10,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    ft.Container(
+                        content=self.mcp_list_col,
+                        expand=3,
+                        border=ft.border.all(1, ft.Colors.OUTLINE_VARIANT),
+                        border_radius=8,
+                        padding=10,
+                    ),
+                    ft.Divider(height=1),
+                    # 下部分：上下文压缩设置
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.COMPRESS, color=ft.Colors.PRIMARY, size=22),
+                            ft.Text("上下文压缩配置 (Context Compaction)", weight=ft.FontWeight.BOLD, size=16),
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Card(
+                        content=ft.Container(
+                            padding=14,
+                            content=ft.Row(
+                                [
+                                    self.switch_auto_compact,
+                                    self.switch_prune_output,
+                                    self.buffer_field,
+                                ],
+                                alignment=ft.MainAxisAlignment.SPACE_AROUND,
+                            ),
+                        ),
+                    ),
+                ],
+                expand=True,
+                spacing=12,
+            ),
+            padding=14,
+            expand=True,
+        )
+
+    def load_mcp(self, mcp: Dict[str, Any]):
+        self.mcp_data = dict(mcp)
+        self._refresh_mcp_list()
+
+    def get_mcp(self) -> Dict[str, Any]:
+        return self.mcp_data
+
+    def load_compaction(self, compaction: Dict[str, Any]):
+        self.compaction_data = dict(compaction)
+        self.switch_auto_compact.value = self.compaction_data.get("autoCompact", True)
+        self.switch_prune_output.value = self.compaction_data.get("prunePreviousOutput", False)
+        buf = self.compaction_data.get("compactionBuffer", 20000)
+        self.buffer_field.value = _to_k_display(buf)
+        safe_update(self.switch_auto_compact, self.page)
+        safe_update(self.switch_prune_output, self.page)
+        safe_update(self.buffer_field, self.page)
+
+    def get_compaction(self) -> Dict[str, Any]:
+        return {
+            "autoCompact": self.switch_auto_compact.value,
+            "prunePreviousOutput": self.switch_prune_output.value,
+            "compactionBuffer": _parse_k_display(self.buffer_field.value, 20),
+        }
+
+    def _refresh_mcp_list(self):
+        self.mcp_list_col.controls.clear()
+        for name, srv in self.mcp_data.items():
+            card = self._create_mcp_card(name, srv)
+            self.mcp_list_col.controls.append(card)
+        safe_update(self.mcp_list_col, self.page)
+
+    def _create_mcp_card(self, name: str, srv: Dict[str, Any]) -> ft.Card:
+        mcp_type = srv.get("type", "local")
+        cmd_or_url = " ".join(srv.get("command", [])) if mcp_type == "local" else srv.get("url", "")
+        enabled = srv.get("enabled", True)
+
+        sw = ft.Switch(
+            value=enabled,
+            on_change=lambda e, n=name: self._toggle_mcp(n, e.control.value),
+        )
+
+        return ft.Card(
+            content=ft.Container(
+                padding=10,
+                content=ft.Row(
+                    [
+                        sw,
+                        ft.Column(
+                            [
+                                ft.Row(
+                                    [
+                                        ft.Text(name, weight=ft.FontWeight.BOLD, size=14),
+                                        ft.Container(
+                                            content=ft.Text(mcp_type.upper(), size=10, color=ft.Colors.WHITE),
+                                            bgcolor=ft.Colors.BLUE_700 if mcp_type == "local" else ft.Colors.PURPLE_700,
+                                            padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                                            border_radius=4,
+                                        ),
+                                    ],
+                                    spacing=8,
+                                ),
+                                ft.Text(
+                                    cmd_or_url,
+                                    size=12,
+                                    color=ft.Colors.GREY_400,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                    max_lines=1,
+                                ),
+                            ],
+                            expand=True,
+                            spacing=4,
+                        ),
+                        ft.Row(
+                            [
+                                ft.IconButton(
+                                    icon=ft.Icons.EDIT_OUTLINED,
+                                    tooltip="编辑",
+                                    on_click=lambda e, n=name, c=srv: self._edit_mcp(n, c),
+                                ),
+                                ft.IconButton(
+                                    icon=ft.Icons.DELETE_OUTLINE,
+                                    tooltip="删除",
+                                    on_click=lambda e, n=name: self._remove_mcp(n),
+                                ),
+                            ],
+                            spacing=4,
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+            ),
+        )
+
+    def _toggle_mcp(self, name: str, enabled: bool):
+        if name in self.mcp_data:
+            self.mcp_data[name]["enabled"] = enabled
+            self._notify_change()
+
+    def _remove_mcp(self, name: str):
+        if name in self.mcp_data:
+            del self.mcp_data[name]
+            self._refresh_mcp_list()
+            self._notify_change()
+
+    def _on_add_mcp(self, e):
+        def on_confirm(name: str, config: Dict[str, Any]):
+            self.mcp_data[name] = config
+            self._refresh_mcp_list()
+            self._notify_change()
+
+        dlg = McpEditDialog(self.page, on_confirm=on_confirm)
+        dlg.open()
+
+    def _edit_mcp(self, name: str, srv: Dict[str, Any]):
+        def on_confirm(new_name: str, config: Dict[str, Any]):
+            if new_name != name and name in self.mcp_data:
+                del self.mcp_data[name]
+            self.mcp_data[new_name] = config
+            self._refresh_mcp_list()
+            self._notify_change()
+
+        dlg = McpEditDialog(self.page, name=name, config=srv, on_confirm=on_confirm)
+        dlg.open()
+
+    def _on_import_json(self, e):
+        def on_confirm(data: Dict):
+            normalized = normalize_mcp_config(data)
+            if not normalized:
+                sb = ft.SnackBar(content=ft.Text("未能识别出有效的 MCP 配置"), bgcolor=ft.Colors.ORANGE_400)
+                self.page.open(sb)
+                return
+
+            self.mcp_data.update(normalized)
+            self._refresh_mcp_list()
+            self._notify_change()
+            sb = ft.SnackBar(content=ft.Text(f"成功导入 {len(normalized)} 个 MCP 服务"), bgcolor=ft.Colors.GREEN_400)
+            self.page.open(sb)
+
+        dlg = JsonImportDialog(self.page, on_confirm=on_confirm)
+        dlg.open()
+
+    def _on_compaction_change(self):
+        self._notify_change()
+
+    def _notify_change(self):
+        if self.on_change_callback:
+            self.on_change_callback()
+
+
+class InstructionsView(ft.Container):
+    """全局提示词 (AGENTS.md) 查看与在线轻量级文本编辑器。"""
+
+    def __init__(self, page: ft.Page, brand: str = "OpenCode"):
+        super().__init__(expand=True)
+        self.page = page
         self.brand = brand
-        self.brand_var.set(brand)
+        self.agents_path = _brand_agents_md_path(self.brand)
 
-        app_title = f"{brand} 配置编辑器"
-        self.title(app_title)
+        self._build_ui()
+        self.load_file()
 
-        self.config_path = _brand_config_path(brand)
-        self.agents_md_path = _brand_agents_md_path(brand)
+    def _build_ui(self):
+        self.path_text = ft.Text(f"路径: {self.agents_path}", size=12, color=ft.Colors.GREY_400, italic=True)
+        self.text_editor = ft.TextField(
+            multiline=True,
+            expand=True,
+            min_lines=20,
+            border_radius=8,
+            hint_text="可以在此编写专属于你的全局角色或提示词指令 (AGENTS.md)...",
+        )
 
-        self.config_path_label.configure(text=f"配置: {self.config_path}")
-        self.instructions_frame.switch_agents_path(self.agents_md_path)
+        self.content = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Icon(ft.Icons.DESCRIPTION, color=ft.Colors.PRIMARY, size=24),
+                                    ft.Text("全局提示词 (AGENTS.md)", weight=ft.FontWeight.BOLD, size=18),
+                                ],
+                                spacing=8,
+                            ),
+                            ft.Row(
+                                [
+                                    ft.OutlinedButton("重新加载", icon=ft.Icons.REFRESH, on_click=lambda e: self.load_file(silent=False)),
+                                    ft.FilledButton("保存文件", icon=ft.Icons.SAVE, on_click=lambda e: self.save_file()),
+                                    ft.OutlinedButton("打开所在文件夹", icon=ft.Icons.FOLDER_OPEN, on_click=lambda e: self.open_folder()),
+                                ],
+                                spacing=10,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    self.path_text,
+                    self.text_editor,
+                ],
+                expand=True,
+                spacing=10,
+            ),
+            padding=14,
+            expand=True,
+        )
 
-        # 保存品牌选择
+    def switch_brand(self, brand: str):
+        self.brand = brand
+        self.agents_path = _brand_agents_md_path(brand)
+        self.path_text.value = f"路径: {self.agents_path}"
+        self.load_file(silent=True)
+        safe_update(self.path_text, self.page)
+
+    def load_file(self, silent: bool = True):
+        if self.agents_path.exists():
+            try:
+                content = self.agents_path.read_text(encoding="utf-8")
+                self.text_editor.value = content
+            except Exception as e:
+                self.text_editor.value = f"读取失败: {e}"
+        else:
+            self.text_editor.value = ""
+
+        safe_update(self.text_editor, self.page)
+        if not silent and self.page:
+            sb = ft.SnackBar(content=ft.Text("提示词已重新加载"), bgcolor=ft.Colors.GREEN_400)
+            self.page.open(sb)
+
+    def save_file(self):
+        try:
+            self.agents_path.parent.mkdir(parents=True, exist_ok=True)
+            self.agents_path.write_text(self.text_editor.value, encoding="utf-8")
+            if self.page:
+                sb = ft.SnackBar(content=ft.Text(f"已保存至 {self.agents_path.name}"), bgcolor=ft.Colors.GREEN_400)
+                self.page.open(sb)
+        except Exception as e:
+            if self.page:
+                sb = ft.SnackBar(content=ft.Text(f"保存失败: {e}"), bgcolor=ft.Colors.RED_400)
+                self.page.open(sb)
+
+    def open_folder(self):
+        ConfigManager.open_path_in_system(self.agents_path.parent)
+
+
+
+# ████████████████████████████████████████████████████████████████████████████████
+# ██  SECTION 8: Flet GUI 顶层应用与主窗口 (EasyOpenKiloApp)
+# ████████████████████████████████████████████████████████████████████████████████
+
+class EasyOpenKiloApp:
+    """应用主控制器：负责整体布局、品牌切换、自动保存定时调度及状态展示。"""
+
+    def __init__(self, page: ft.Page):
+        self.page = page
+        self.brand = "OpenCode"
+        self.auto_save_enabled = False
+        self.sync_enabled = False
+
+        self._auto_save_timer: Optional[threading.Timer] = None
+        self._config_manager = ConfigManager(self.brand)
+        self._last_config_hash = ""
+
+        self._load_app_settings()
+        self._setup_window()
+        self._build_ui()
+        self.load_all_config()
+
+    def _setup_window(self):
+        self.page.title = f"{APP_NAME} v{APP_VERSION}"
+        self.page.window.width = WINDOW_WIDTH
+        self.page.window.height = WINDOW_HEIGHT
+        self.page.window.min_width = 1050
+        self.page.window.min_height = 650
+        self.page.window.center()
+
+        self.page.theme_mode = ft.ThemeMode.DARK
+        self.page.theme = ft.Theme(
+            font_family=get_system_font_family(),
+            color_scheme_seed=ft.Colors.BLUE_ACCENT,
+            use_material3=True,
+        )
+
+    def _load_app_settings(self):
+        settings = load_app_settings()
+        self.brand = settings.get("brand", "OpenCode")
+        self.auto_save_enabled = settings.get("auto_save", False)
+        self.sync_enabled = settings.get("sync_enabled", False)
+        self._config_manager = ConfigManager(self.brand)
+
+    def _save_app_settings(self):
+        settings = {
+            "brand": self.brand,
+            "auto_save": self.auto_save_enabled,
+            "sync_enabled": self.sync_enabled,
+        }
+        save_app_settings(settings)
+
+    def _build_ui(self):
+        # 顶栏 Header
+        self.brand_dropdown = ft.Dropdown(
+            value=self.brand,
+            options=[
+                ft.dropdown.Option("OpenCode", "OpenCode (TUI)"),
+                ft.dropdown.Option("KiloCode", "KiloCode (VSCode)"),
+            ],
+            dense=True,
+            width=200,
+            on_change=self._on_brand_change,
+        )
+
+        self.switch_auto_save = ft.Switch(
+            label="自动保存",
+            value=self.auto_save_enabled,
+            on_change=self._on_auto_save_toggle,
+        )
+        self.switch_sync = ft.Switch(
+            label="同步修改",
+            value=self.sync_enabled,
+            tooltip="开启后，修改将自动精准合并到另一个品牌的配置中",
+            on_change=self._on_sync_toggle,
+        )
+
+        self.btn_save = ft.FilledButton("保存配置", icon=ft.Icons.SAVE, on_click=lambda e: self.save_all_config(silent=False))
+        self.btn_sync = ft.OutlinedButton("同步到目标品牌", icon=ft.Icons.SYNC, on_click=lambda e: self._manual_sync_dialog())
+        self.btn_open_file = ft.OutlinedButton("打开配置文件", icon=ft.Icons.FILE_OPEN, on_click=lambda e: self._open_config_file())
+
+        self.header = ft.Container(
+            padding=ft.padding.symmetric(horizontal=16, vertical=8),
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+            border_radius=8,
+            content=ft.Row(
+                [
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.DASHBOARD_CUSTOMIZE, color=ft.Colors.PRIMARY, size=24),
+                            self.brand_dropdown,
+                        ],
+                        spacing=10,
+                    ),
+                    ft.Row(
+                        [
+                            self.switch_auto_save,
+                            self.switch_sync,
+                            self.btn_save,
+                            self.btn_sync,
+                            self.btn_open_file,
+                        ],
+                        spacing=12,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            ),
+        )
+
+        # 核心三大视图
+        self.provider_view = ProviderView(self.page, on_change=self._on_content_modified)
+        self.mcp_view = McpCompactionView(self.page, on_change=self._on_content_modified)
+        self.instructions_view = InstructionsView(self.page, brand=self.brand)
+
+        # 选项卡 Tabs
+        self.tabs = ft.Tabs(
+            selected_index=0,
+            tabs=[
+                ft.Tab(text="Provider 与模型管理", icon=ft.Icons.STORAGE, content=self.provider_view),
+                ft.Tab(text="MCP 与上下文压缩", icon=ft.Icons.EXTENSION, content=self.mcp_view),
+                ft.Tab(text="全局提示词 (AGENTS.md)", icon=ft.Icons.DESCRIPTION, content=self.instructions_view),
+            ],
+            expand=True,
+        )
+
+        self.page.add(
+            ft.Column(
+                [
+                    self.header,
+                    self.tabs,
+                ],
+                expand=True,
+                spacing=8,
+            )
+        )
+
+    # ---------------- 配置生命周期 ----------------
+
+    def load_all_config(self, silent: bool = True):
+        self._config_manager = ConfigManager(self.brand)
+        raw_cfg = self._config_manager.load_config()
+
+        # 加载 providers
+        providers = self._config_manager.load_providers_with_keys()
+        self.provider_view.load_providers(providers)
+
+        # 加载 MCP 与 compaction
+        self.mcp_view.load_mcp(raw_cfg.get("mcp", {}))
+        self.mcp_view.load_compaction(raw_cfg.get("compaction", {}))
+
+        # 加载 instructions
+        self.instructions_view.switch_brand(self.brand)
+
+        self._last_config_hash = self._config_manager.get_config_hash()
+
+        if not silent:
+            self.show_status("配置已成功重新加载", ft.Colors.GREEN_400)
+
+    def save_all_config(self, silent: bool = False):
+        try:
+            providers = self.provider_view.get_providers()
+            mcp = self.mcp_view.get_mcp()
+            compaction = self.mcp_view.get_compaction()
+
+            self._config_manager.save_config(
+                providers=providers,
+                mcp=mcp,
+                compaction=compaction,
+                sync_to_other=self.sync_enabled,
+            )
+            self._last_config_hash = self._config_manager.get_config_hash()
+
+            if not silent:
+                hint = (
+                    "按 Ctrl+Shift+P 执行 Reload Window 生效"
+                    if self.brand == "KiloCode"
+                    else "在终端中输入 /reload 或重启生效"
+                )
+                self.show_status(f"配置已保存至 {self.brand} | {hint}", ft.Colors.GREEN_400)
+        except Exception as e:
+            self.show_status(f"保存失败: {e}", ft.Colors.RED_400)
+
+    def _on_content_modified(self):
+        if self.auto_save_enabled:
+            self._schedule_auto_save()
+
+    def _schedule_auto_save(self):
+        if self._auto_save_timer:
+            self._auto_save_timer.cancel()
+        self._auto_save_timer = threading.Timer(1.0, lambda: self.save_all_config(silent=True))
+        self._auto_save_timer.daemon = True
+        self._auto_save_timer.start()
+
+    def _on_brand_change(self, e):
+        new_brand = self.brand_dropdown.value
+        if new_brand != self.brand:
+            self.brand = new_brand
+            self._save_app_settings()
+            self.load_all_config(silent=True)
+            self.show_status(f"已切换当前品牌为: {self.brand}", ft.Colors.BLUE_400)
+
+    def _on_auto_save_toggle(self, e):
+        self.auto_save_enabled = self.switch_auto_save.value
         self._save_app_settings()
 
-        self._load_config(silent=False)
-    
-    def _export_config(self):
-        """导出配置（包含明文 API Key）"""
+    def _on_sync_toggle(self, e):
+        self.sync_enabled = self.switch_sync.value
+        self._save_app_settings()
+
+    def _open_config_file(self):
+        cfg_path = self._config_manager.config_path
+        if not cfg_path.exists():
+            self.save_all_config(silent=True)
+        ConfigManager.open_path_in_system(cfg_path)
+
+    def _manual_sync_dialog(self):
+        target_brand = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(f"确认同步到 {target_brand}？", weight=ft.FontWeight.BOLD),
+            content=ft.Text(
+                f"将当前 {self.brand} 的 Provider、模型配置、MCP 服务及全局提示词精准合并至 {target_brand}。\n"
+                f"目标品牌中专有及未支持编辑的字段将被安全保留。",
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda ev: self.page.close(dlg)),
+                ft.FilledButton("确认同步", on_click=lambda ev: self._do_manual_sync(dlg)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dlg)
+
+    def _do_manual_sync(self, dlg: ft.AlertDialog):
+        self.page.close(dlg)
         try:
-            # 弹出警告
-            warning_msg = (
-                "⚠️ 警告 ⚠️\n\n"
-                "导出的配置文件将包含所有 API Key 的明文！\n\n"
-                "请务必：\n"
-                "1. 不要将此文件提交到版本控制\n"
-                "2. 不要分享给不可信的人\n"
-                "3. 妥善保管此文件\n\n"
-                "确定要继续导出吗？"
-            )
-            
-            if not messagebox.askyesno("安全警告", warning_msg):
-                return
-            
-            # 选择保存路径
-            file_path = filedialog.asksaveasfilename(
-                title="导出配置",
-                defaultextension=".json",
-                filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")],
-                initialfile=f"{self.brand.lower().replace(' ', '-')}-export.json"
-            )
-            
-            if not file_path:
-                return
-            
-            # 读取现有配置
-            config = {}
-            if self.config_path.exists():
-                with open(self.config_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    lines = content.split("\n")
-                    cleaned_lines = [l for l in lines if not l.strip().startswith("//")]
-                    config = json.loads("\n".join(cleaned_lines))
-            
-            # 读取 auth.json
-            auth_data = load_auth_json(self.brand)
-            
-            # 将 API Key 合并到配置中
-            if "provider" in config:
-                for name, provider in config["provider"].items():
-                    if name in auth_data and "key" in auth_data[name]:
-                        if "options" not in provider:
-                            provider["options"] = {}
-                        provider["options"]["apiKey"] = auth_data[name]["key"]
-            
-            # 保存导出文件
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-            
-            self.show_status(f"已导出到: {file_path}", "success")
-            
-            # 询问是否打开
-            if messagebox.askyesno("导出成功", f"配置已导出到:\n{file_path}\n\n是否立即打开？"):
-                system = platform.system()
-                if system == "Windows":
-                    os.startfile(file_path)
-                elif system == "Darwin":
-                    os.system(f'open "{file_path}"')
-                else:
-                    os.system(f'xdg-open "{file_path}"')
-            
-        except Exception as e:
-            self.show_status(f"导出失败: {str(e)}", "error")
+            self.save_all_config(silent=True)
+            curr_cfg = self._config_manager.load_config()
+            curr_auth = load_auth_json(self.brand)
+            self._config_manager.sync_to_other_brand(curr_cfg, curr_auth)
+            target = "KiloCode" if self.brand == "OpenCode" else "OpenCode"
+            self.show_status(f"已成功将配置精准合并同步至 {target}", ft.Colors.GREEN_400)
+        except Exception as err:
+            self.show_status(f"同步失败: {err}", ft.Colors.RED_400)
+
+    def show_status(self, text: str, color: str = ft.Colors.GREEN_400):
+        if self.page:
+            sb = ft.SnackBar(content=ft.Text(text), bgcolor=color, duration=4000)
+            self.page.open(sb)
+
 
 
 # ████████████████████████████████████████████████████████████████████████████████
-# ██  程序入口
+# ██  SECTION 9: 应用主入口 (main)
 # ████████████████████████████████████████████████████████████████████████████████
 
-def main():
-    """主函数"""
-    if platform.system() == "Windows":
-        try:
-            from ctypes import windll
-            windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
-    
-    app = App()
-    app.mainloop()
+def main(page: ft.Page):
+    """Flet 应用启动入口。"""
+    EasyOpenKiloApp(page)
 
 
 if __name__ == "__main__":
-    main()
+    ft.app(target=main)
