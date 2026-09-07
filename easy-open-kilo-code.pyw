@@ -31,6 +31,10 @@ APP_VERSION = "2.0.0"
 WINDOW_WIDTH = 1450
 WINDOW_HEIGHT = 880
 
+# 新添加模型的默认上下文/输出限制（单位：token）
+DEFAULT_MODEL_CONTEXT = 500000
+DEFAULT_MODEL_OUTPUT = 64000
+
 
 def get_system_font_family() -> str:
     """获取兼容 Ubuntu Desktop、Windows 以及 macOS 的最推荐字体。
@@ -1299,7 +1303,7 @@ class ProviderView(ft.Container):
         self.provider_list_col.controls.clear()
         for name, p_data in self.providers_data.items():
             is_selected = (name == self.current_provider_name)
-            tile = ft.Container(
+            select_area = ft.Container(
                 content=ft.Row(
                     [
                         ft.Icon(
@@ -1313,6 +1317,17 @@ class ProviderView(ft.Container):
                             color=ft.Colors.PRIMARY if is_selected else None,
                             expand=True,
                         ),
+                    ],
+                    spacing=8,
+                ),
+                expand=True,
+                on_click=lambda e, n=name: self.select_provider(n),
+            )
+            tile = ft.Container(
+                # 删除按钮与选择区域并列，避免点击删除时触发 Provider 选择事件。
+                content=ft.Row(
+                    [
+                        select_area,
                         ft.IconButton(
                             icon=ft.Icons.DELETE_OUTLINE,
                             icon_size=18,
@@ -1320,17 +1335,20 @@ class ProviderView(ft.Container):
                             on_click=lambda e, n=name: self._remove_provider(n),
                         ),
                     ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    spacing=4,
                 ),
                 padding=8,
                 border_radius=8,
                 bgcolor=ft.Colors.SECONDARY_CONTAINER if is_selected else ft.Colors.SURFACE_CONTAINER_HIGHEST,
-                on_click=lambda e, n=name: self.select_provider(n),
             )
             self.provider_list_col.controls.append(tile)
         safe_update(self.provider_list_col, self.page)
 
     def select_provider(self, name: str):
+        # 删除后可能仍有一个已排队的点击事件，不能重新选中已不存在的 Provider。
+        if name not in self.providers_data:
+            return
+
         if self.current_provider_name:
             self._sync_ui_to_current_provider()
 
@@ -1356,16 +1374,19 @@ class ProviderView(ft.Container):
     def _sync_ui_to_current_provider(self):
         if not self.current_provider_name or self.current_provider_name not in self.providers_data:
             return
-        p_data = self.providers_data[self.current_provider_name]
-        new_name = self.name_field.value.strip()
+        current_name = self.current_provider_name
+        p_data = self.providers_data[current_name]
+        new_name = (self.name_field.value or "").strip()
 
         p_data["npm"] = npm_for_protocol(self.protocol_dropdown.value)
         p_data.setdefault("options", {})["baseURL"] = self.base_url_field.value.strip()
         p_data["options"]["apiKey"] = self.api_key_field.value.strip()
+        # Provider 的对象名称也必须与界面名称保持一致，避免只修改配置键名。
+        p_data["name"] = new_name or current_name
 
         # 处理重命名
-        if new_name and new_name != self.current_provider_name:
-            self.providers_data[new_name] = self.providers_data.pop(self.current_provider_name)
+        if new_name and new_name != current_name:
+            self.providers_data[new_name] = self.providers_data.pop(current_name)
             self.current_provider_name = new_name
             self._refresh_provider_list()
 
@@ -1398,18 +1419,26 @@ class ProviderView(ft.Container):
         self._notify_change()
 
     def _remove_provider(self, name: str):
-        if name in self.providers_data:
-            del self.providers_data[name]
-            if self.current_provider_name == name:
-                self.current_provider_name = next(iter(self.providers_data)) if self.providers_data else None
-                if self.current_provider_name:
-                    self.select_provider(self.current_provider_name)
-                else:
-                    self._clear_details()
-                    self._refresh_provider_list()
+        if name not in self.providers_data:
+            return
+
+        was_selected = self.current_provider_name == name
+        if was_selected:
+            # 先清空当前状态，防止 select_provider() 将已删除项的表单内容
+            # 同步到删除后的第一个 Provider。
+            self.current_provider_name = None
+
+        del self.providers_data[name]
+        if was_selected:
+            next_name = next(iter(self.providers_data), None)
+            if next_name:
+                self.select_provider(next_name)
             else:
+                self._clear_details()
                 self._refresh_provider_list()
-            self._notify_change()
+        else:
+            self._refresh_provider_list()
+        self._notify_change()
 
     def _on_protocol_change(self, e):
         if self.current_provider_name:
@@ -1458,8 +1487,8 @@ class ProviderView(ft.Container):
 
     def _create_model_card(self, model_id: str, model_data: Dict[str, Any], protocol: str) -> ft.Card:
         limit = model_data.get("limit", {})
-        context_k = _to_k_display(limit.get("context", 128000))
-        output_k = _to_k_display(limit.get("output", 4096))
+        context_k = _to_k_display(limit.get("context", DEFAULT_MODEL_CONTEXT))
+        output_k = _to_k_display(limit.get("output", DEFAULT_MODEL_OUTPUT))
         has_image = "image" in model_data.get("modalities", {}).get("input", ["text"])
 
         variants = model_data.get("variants")
@@ -1581,7 +1610,7 @@ class ProviderView(ft.Container):
         p_data = self.providers_data.get(self.current_provider_name, {})
         model = p_data.get("models", {}).get(model_id)
         if model:
-            val = _parse_k_display(value_str, 128 if field == "context" else 4)
+            val = _parse_k_display(value_str, 500 if field == "context" else 64)
             model.setdefault("limit", {})[field] = val
             self._notify_change()
 
@@ -1663,7 +1692,7 @@ class ProviderView(ft.Container):
         p_data = self.providers_data[self.current_provider_name]
         protocol = self.protocol_dropdown.value
         p_data.setdefault("models", {})[model_id] = {
-            "limit": {"context": 128000, "output": 4096},
+            "limit": {"context": DEFAULT_MODEL_CONTEXT, "output": DEFAULT_MODEL_OUTPUT},
             "modalities": {"input": ["text", "image"]},
             "variants": default_model_variants(protocol, model_id),
         }
@@ -1698,7 +1727,7 @@ class ProviderView(ft.Container):
                     for m in selected_models:
                         mid = m["id"]
                         p_data.setdefault("models", {})[mid] = {
-                            "limit": {"context": 128000, "output": 4096},
+                            "limit": {"context": DEFAULT_MODEL_CONTEXT, "output": DEFAULT_MODEL_OUTPUT},
                             "modalities": {"input": ["text", "image"]},
                             "variants": default_model_variants(protocol, mid),
                         }
